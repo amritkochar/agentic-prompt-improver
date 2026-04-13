@@ -1,0 +1,756 @@
+{
+  "detection": {
+    "issues": [
+      {
+        "id": "WA-01",
+        "dimension": "workflow_adherence",
+        "severity": "critical",
+        "title": "get_available_slots uses DD-MM-YYYY format but find_appointment and find_patient use YYYY-MM-DD",
+        "description": "The get_available_slots tool defines start_date as DD-MM-YYYY format, while find_patient uses YYYY-MM-DD and find_appointment uses YYYY-MM-DD for date_from/date_to. The prompt never mentions this format discrepancy or instructs the agent to format dates differently per tool. In production, the agent will almost certainly pass YYYY-MM-DD to get_available_slots (consistent with the other tools), causing silent API failures or incorrect slot results. This is especially dangerous because no error handling is described for a failed slot search.",
+        "evidence": "\"start_date\": { \"type\": \"string\", \"description\": \"Start date for search window in DD-MM-YYYY format\" }",
+        "location_hint": "get_available_slots tool definition, start_date parameter"
+      },
+      {
+        "id": "WA-02",
+        "dimension": "workflow_adherence",
+        "severity": "critical",
+        "title": "Rescheduling cancels old appointment before confirming new slot exists, with no rollback",
+        "description": "The rescheduling workflow instructs the agent to cancel the old appointment first using cancel_appointment before a new appointment is successfully booked. If get_available_slots returns no results, or if book_appointment fails, the patient has lost their original appointment with no way to restore it. There is no rollback instruction or contingency path described for this failure scenario.",
+        "evidence": "\"Cancel the old appointment first using cancel_appointment. The same cancellation policy applies \u2014 if it is within 24 hours, inform them of the possible fee. Then schedule a new appointment.\"",
+        "location_hint": "For rescheduling appointments section"
+      },
+      {
+        "id": "WA-03",
+        "dimension": "workflow_adherence",
+        "severity": "critical",
+        "title": "No error handling defined for any tool call failure",
+        "description": "The prompt defines no instructions for what the agent should do when any tool call returns an error, times out, or returns unexpected data. For book_appointment, cancel_appointment, find_patient, and send_sms, silent failures would leave patients with incorrect beliefs about their appointment status. There is no fallback such as 'if booking fails, inform the patient and offer to transfer to front desk.'",
+        "evidence": "Tools available: find_patient, find_appointment, get_available_slots, book_appointment, cancel_appointment, confirm_appointment, transfer_call, send_sms, end_call",
+        "location_hint": "Introduction / Tools available section \u2014 absence of error handling throughout"
+      },
+      {
+        "id": "WA-04",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "get_available_slots lacks end_date parameter, making search window undefined",
+        "description": "The get_available_slots tool only accepts a start_date, with no end_date or window_days parameter. The prompt instructs the agent to search 'the next 30 days' and 'the next week,' but there is no way to constrain the search window via the tool. The API will return a server-default window, which may produce too many results or results spanning months, making the two-option presentation logic unreliable.",
+        "evidence": "\"If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives.\" and \"start_date\": { \"type\": \"string\", \"description\": \"Start date for search window in DD-MM-YYYY format\" }",
+        "location_hint": "get_available_slots tool definition and scheduling workflow section"
+      },
+      {
+        "id": "WA-05",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "Waitlist functionality referenced but no tool or mechanism exists to record it",
+        "description": "The prompt instructs the agent to 'put them on a waitlist' and 'take their preferred provider, date range, and time of day preference and make a note' in two separate scenarios, but no tool exists for this. There is no waitlist tool, no notes tool, and no instructions to use send_sms or book_appointment to record waitlist intent. The agent will either hallucinate a capability or silently fail to record the patient's request.",
+        "evidence": "\"offer to put them on a waitlist \u2014 take their preferred provider, date range, and time of day preference and make a note.\" and \"offer to be added to the waitlist for Dr. Chen\"",
+        "location_hint": "Scheduling workflow \u2014 slot search section and no-availability section"
+      },
+      {
+        "id": "WA-07",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "Cancellation workflow does not send SMS confirmation after canceling",
+        "description": "The scheduling and rescheduling workflows both include send_sms steps, but the standalone cancellation workflow has no instruction to send an SMS confirmation after cancel_appointment succeeds. The send_sms tool supports message_type 'appointment_cancelled' explicitly, indicating this is an intended capability. Patients who cancel will not receive written confirmation of their cancellation.",
+        "evidence": "\"If they say yes, use cancel_appointment.\" \u2014 no subsequent send_sms instruction follows in the cancellation section.",
+        "location_hint": "For canceling appointments section"
+      },
+      {
+        "id": "WA-08",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "Phone number format for find_patient is unspecified, likely causing lookup failures",
+        "description": "The find_patient tool accepts a phone parameter but gives no format specification. The prompt instructs the agent to try the caller's phone number (available as {{user_number}}) as a third-step fallback, but {{user_number}} format (e.g., +1XXXXXXXXXX vs 10-digit vs formatted) may not match the EHR's expected format. No normalization instruction is given, and a format mismatch will cause silent no-match results on what may be the last viable verification attempt before transferring.",
+        "evidence": "\"ask if the phone number they are calling from is the one on file or if there is a different number. Try again with the phone number.\" and \"phone\": { \"type\": \"string\", \"description\": \"Patient phone number\" }",
+        "location_hint": "Patient verification section and find_patient tool definition"
+      },
+      {
+        "id": "WA-09",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "3-year new patient rule not enforced \u2014 agent not instructed to check last_visit_date",
+        "description": "The prompt instructs the agent to treat patients not seen in over 3 years as new patients requiring a new patient visit, but the scheduling workflow does not instruct the agent to inspect the last_visit_date field returned by find_patient and apply this rule. If an existing patient has a record but was last seen 4 years ago, the agent will verify them normally and proceed with scheduling a follow-up or other visit type rather than routing them as a new patient.",
+        "evidence": "\"If a patient has not been seen in over 3 years, they need to be scheduled as a new patient even if they are already in the system. The system may still have their record but they need a new patient visit to update everything.\"",
+        "location_hint": "Scheduling rules section"
+      },
+      {
+        "id": "WA-10",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "3-appointment limit cannot be checked \u2014 agent has no instruction to use find_appointment to verify count before booking",
+        "description": "The prompt states 'Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know and ask if they want to cancel one or speak with the front desk.' However, the scheduling workflow does not instruct the agent to call find_appointment before booking to count existing upcoming appointments. The agent will proceed directly to get_available_slots and book_appointment without enforcing this business rule.",
+        "evidence": "\"Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know and ask if they want to cancel one or speak with the front desk.\"",
+        "location_hint": "Scheduling rules section"
+      },
+      {
+        "id": "WA-11",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "late_cancel flag not instructed to be set in cancel_appointment call when within 24 hours",
+        "description": "The cancel_appointment tool has a late_cancel boolean parameter. The prompt describes the 24-hour cancellation policy and says to inform the patient of a possible fee, but never instructs the agent to pass late_cancel: true when canceling within 24 hours. This means the cancellation fee flag will never be set in the system, causing billing to miss chargeable late cancellations.",
+        "evidence": "\"If they are canceling same-day or with less than 24 hours notice, let them know there may be a cancellation fee.\" \u2014 no instruction to set late_cancel: true in the cancel_appointment call.",
+        "location_hint": "Cancellation policy section and cancel_appointment tool definition"
+      },
+      {
+        "id": "WA-13",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "No guard instruction to prevent calling get_available_slots for Dr. Patel during maternity leave",
+        "description": "The prompt instructs the agent not to schedule Dr. Patel from March 15 through June 1 2026, but there is no explicit instruction to avoid calling get_available_slots for Dr. Patel during that window. If the scheduling system has not blocked those slots, or if the agent misidentifies the date boundary, it may present and book slots with her during her leave period.",
+        "evidence": "\"She is on maternity leave starting March 15 2026 and returning June 1 2026. During her leave, her patients should be scheduled with Dr. Chen.\"",
+        "location_hint": "Provider information section \u2014 Dr. Priya Patel"
+      },
+      {
+        "id": "WA-14",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "Provider IDs and location IDs are never defined \u2014 agent cannot correctly populate required fields in get_available_slots and book_appointment",
+        "description": "The get_available_slots and book_appointment tools require provider_id and location_id as strings, and both are marked required. The prompt describes providers and locations by name but never provides their system ID values. The agent must infer or hallucinate IDs such as 'provider_id for Dr. Chen' or 'location_id for Main Office,' which will cause API failures on every booking attempt.",
+        "evidence": "\"provider_id\": { \"type\": \"string\", \"description\": \"Provider ID \u2014 required to search for a specific provider's slots\" }\" and \"location_id\": { \"type\": \"string\", \"description\": \"Location ID where the appointment should be held\" }",
+        "location_hint": "get_available_slots and book_appointment tool definitions \u2014 no ID mapping table in prompt"
+      },
+      {
+        "id": "WA-16",
+        "dimension": "workflow_adherence",
+        "severity": "high",
+        "title": "Urgent visit same-day enforcement relies solely on agent reasoning with no date-constraining mechanism in the tool",
+        "description": "Urgent visits are same-day only and cannot be scheduled in advance. However, the agent is not explicitly instructed to derive today's date from {{current_time_America/New_York}} and use it as the start_date when calling get_available_slots for urgent visits. Without this explicit instruction, the agent may pass an incorrect or future date. Additionally, since get_available_slots has no end_date parameter, there is no way to constrain results to today only via the tool itself.",
+        "evidence": "\"Urgent Visit: 15 minutes. Same-day only. Can only be booked with PA Marcus Davis. For issues that need immediate attention but are not emergencies...Cannot be scheduled in advance.\"",
+        "location_hint": "Appointment types section \u2014 Urgent Visit"
+      },
+      {
+        "id": "WA-15",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "Lab review ordering provider rule cannot be enforced \u2014 no tool field exposes ordering provider data",
+        "description": "The prompt instructs the agent to 'schedule a lab review with the ordering provider only' and to correct patients who request the wrong doctor. However, no tool returns an ordering_provider or lab_order_provider field. The agent must rely entirely on what the patient states, which defeats the guard condition entirely.",
+        "evidence": "\"Lab review appointments have to be with the doctor who ordered the labs. If they say 'I want to review my bloodwork with Dr. Torres' but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.\"",
+        "location_hint": "Scheduling rules section \u2014 lab review rule"
+      },
+      {
+        "id": "WA-18",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "Referring provider instructed to be placed in notes field instead of the dedicated referring_provider parameter",
+        "description": "The prompt says 'make a note of the referring provider's name when booking. Include it in the notes field.' But book_appointment has a dedicated referring_provider field separate from notes. The prompt instructs misuse of the notes field for referring provider data instead of the correct parameter, causing structured data to be stored as unstructured text.",
+        "evidence": "\"If a patient says they were referred by another doctor, make a note of the referring provider's name when booking. Include it in the notes field.\"",
+        "location_hint": "Additional scheduling guidelines section \u2014 referral note instruction"
+      },
+      {
+        "id": "WA-19",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "Confirm appointment workflow does not send SMS confirmation after confirming",
+        "description": "After using confirm_appointment, the prompt says 'Your appointment has been confirmed. We look forward to seeing you.' but gives no instruction to call send_sms with message_type 'appointment_confirmed'. The send_sms tool explicitly supports this message type, and patients expect written confirmation when they confirm verbally.",
+        "evidence": "\"use confirm_appointment and say 'Your appointment has been confirmed. We look forward to seeing you.'\" \u2014 no send_sms instruction follows.",
+        "location_hint": "For confirming appointments section"
+      },
+      {
+        "id": "WA-20",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "6-month advance booking limit has no enforcement mechanism",
+        "description": "The prompt states 'Do not schedule appointments more than 6 months in advance,' but there is no instruction on how to calculate or enforce this limit using available tools. get_available_slots has no max_date parameter, and the agent is not instructed to derive a 6-month cutoff from {{current_time_America/New_York}} and filter returned slots against it.",
+        "evidence": "\"Do not schedule appointments more than 6 months in advance.\"",
+        "location_hint": "Scheduling rules section"
+      },
+      {
+        "id": "WA-21",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "send_sms after rescheduling uses wrong message_type \u2014 no instruction to use appointment_rescheduled",
+        "description": "The send_sms tool defines a dedicated message_type of 'appointment_rescheduled', but the rescheduling workflow only instructs the agent to book a new appointment and send a confirmation. There is no instruction to use the appointment_rescheduled message type, and the agent will likely default to appointment_booked, producing a misleading message to the patient that omits context about the cancellation of the prior appointment.",
+        "evidence": "\"Then schedule a new appointment. Ask when they would like to come in. Use get_available_slots to find openings. Offer them two times. If they pick one, confirm and book with book_appointment.\" \u2014 no send_sms with appointment_rescheduled instruction follows.",
+        "location_hint": "For rescheduling appointments section \u2014 post-booking step"
+      },
+      {
+        "id": "WA-22",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "cancelled_by parameter never instructed to be set in cancel_appointment, breaking audit trail",
+        "description": "The cancel_appointment tool defines a cancelled_by field ('patient, provider, office') that, while not marked required, is clearly important for billing and audit purposes. The prompt never instructs the agent to set this field to 'patient' for patient-initiated cancellations. All cancellations processed by the agent will be missing this attribution.",
+        "evidence": "\"cancelled_by\": { \"type\": \"string\", \"description\": \"Who is cancelling: patient, provider, office\" }",
+        "location_hint": "cancel_appointment tool definition \u2014 field never referenced in prompt"
+      },
+      {
+        "id": "PE-02",
+        "dimension": "patient_experience",
+        "severity": "high",
+        "title": "Distressed, angry, or emotionally escalated callers have no defined de-escalation or escalation pathway",
+        "description": "The prompt only offers two generic phrases for upset patients: 'I understand' or 'I apologize for the inconvenience.' There is no guidance for callers who are frightened, grieving, panicked, or persistently angry, and no escalation path to a supervisor or office manager is defined for situations where the agent's responses are not resolving the caller's distress.",
+        "evidence": "\"If the patient gets frustrated or seems upset, say 'I understand' or 'I apologize for the inconvenience' and try to help them.\"",
+        "location_hint": "General instructions section \u2014 emotional handling"
+      },
+      {
+        "id": "PE-05",
+        "dimension": "patient_experience",
+        "severity": "medium",
+        "title": "Prohibition on contractions creates unnatural robotic speech throughout all interactions",
+        "description": "The instruction to never use contractions will make the agent sound stilted and robotic in natural phone conversation. Contractions are a normal feature of spoken American English and their absence is conspicuous and off-putting, undermining the goal of a warm, professional interaction. This is especially problematic during empathetic moments.",
+        "evidence": "\"Do not use contractions like 'I'm' or 'can't'. Say 'I am' and 'cannot'.\"",
+        "location_hint": "Speech style instructions section"
+      },
+      {
+        "id": "PE-06",
+        "dimension": "patient_experience",
+        "severity": "medium",
+        "title": "Provider biographical details included with no guidance on when or how to share them",
+        "description": "The prompt includes extensive provider background data (years with practice, star ratings, degrees, specialties, patient comments) but gives no instruction on when or how to share this information conversationally. Without guidance, the agent may dump all provider details unprompted or never use them, and there is no instruction to use these details to help hesitant patients make a provider choice.",
+        "evidence": "\"She has a 4.9 star patient satisfaction rating. Her patients frequently comment on her thoroughness and bedside manner. She has been with the practice for 12 years.\"",
+        "location_hint": "Provider information section \u2014 Dr. Sarah Chen"
+      },
+      {
+        "id": "PE-11",
+        "dimension": "patient_experience",
+        "severity": "medium",
+        "title": "Cancellation fee warning script is not calibrated to patient emotional state or hardship reasons",
+        "description": "The scripted cancellation fee warning is delivered as a policy recitation regardless of context. A patient canceling because of a family emergency or their own illness will experience this as cold and punitive. There is no instruction to adjust tone when a patient explains a hardship reason for late cancellation, nor any guidance to offer empathy before stating the policy.",
+        "evidence": "\"Say something like 'I can certainly cancel that for you. I do want to let you know that since the appointment is within 24 hours, there may be a late cancellation fee per our office policy. Would you still like to proceed with the cancellation?'\"",
+        "location_hint": "Cancellation policy section"
+      }
+    ],
+    "analysis_notes": "Changes made: REMOVED WA-06 (send_sms patient_id scope) \u2014 the patient_id is obtained during verification at the start of every workflow and there is no realistic multi-turn mechanism that would clear it; the claim about appointment_id is speculative. REMOVED WA-12 (cancelled_by audit trail) \u2014 this was substantively identical to the retained WA-22, which is a cleaner formulation; kept WA-22 instead. REMOVED WA-17 (pharmacy/records destinations unused) \u2014 this is a stylistic/dead-code observation about the tool definition, not a prompt quality issue; the transfer destinations the prompt does reference all map correctly to defined values. REMOVED PE-01 (new patient routing abrupt) \u2014 the scripted language is functional and appropriate for a front-desk voice agent; the critique is a stylistic preference. REMOVED PE-03 (verification is interrogative) \u2014 the sequential name/DOB collection is standard medical office practice and appropriate for a voice agent; this is a stylistic preference. REMOVED PE-04 (no sub-emergency distress response) \u2014 this is speculative and overlaps with PE-02, which covers the broader gap in emotional handling. REMOVED PE-07 (hold language perfunctory) \u2014 purely stylistic. REMOVED PE-08 (cancellation fee tone) \u2014 folded into retained PE-11 as a cleaner version of the same issue. REMOVED PE-09 (persona too thin) \u2014 stylistic preference. REMOVED PE-10 (slot presentation rigid) \u2014 stylistic preference. REMOVED PE-11 original numbering conflict \u2014 renumbered to PE-11 for cancellation fee issue. ADDED WA-21 (rescheduling workflow missing appointment_rescheduled message_type instruction) \u2014 the send_sms tool has a dedicated message_type for rescheduling that the prompt never references, which is a concrete tool-usage gap. ADDED WA-22 (cancelled_by field) \u2014 retained from WA-12 with improved framing. WA-09 was revised to be more precise: the issue is not that the rule is 'unverifiable' (last_visit_date IS returned by find_patient) but that the scheduling workflow never instructs the agent to check it. This is a more accurate and actionable framing."
+  },
+  "analysis": {
+    "proposals": [
+      {
+        "issue_id": "WA-01",
+        "root_cause": "The get_available_slots tool requires DD-MM-YYYY format for start_date, but the agent naturally uses YYYY-MM-DD consistent with the other tools, creating a silent format mismatch.",
+        "impact_if_unfixed": "Every slot search will fail or return wrong results, making scheduling impossible.",
+        "fix_description": "Add an explicit instruction in the scheduling workflow to format the start_date as DD-MM-YYYY when calling get_available_slots.",
+        "original_text": "Now you need to find available times. Use get_available_slots to search for openings.",
+        "replacement_text": "Now you need to find available times. Use get_available_slots to search for openings. When calling get_available_slots, format the start_date as DD-MM-YYYY (for example, June 5th 2026 becomes 05-06-2026).",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-02",
+        "root_cause": "The rescheduling workflow cancels the old appointment before confirming a new slot exists, leaving the patient with no appointment if booking fails.",
+        "impact_if_unfixed": "Patients can lose their original appointment with no way to recover it if no new slot is available or booking fails.",
+        "fix_description": "Reverse the order: find and confirm the new slot before canceling the old appointment.",
+        "original_text": "Cancel the old appointment first using cancel_appointment. The same cancellation policy applies \u2014 if it is within 24 hours, inform them of the possible fee.\n\nThen schedule a new appointment. Ask when they would like to come in. Use get_available_slots to find openings. Offer them two times. If they pick one, confirm and book with book_appointment.",
+        "replacement_text": "First, schedule the new appointment. Ask when they would like to come in. Use get_available_slots to find openings. Offer them two times. Once they have chosen a new time and you have confirmed the details with them, then cancel the old appointment using cancel_appointment. The same cancellation policy applies \u2014 if it is within 24 hours, inform them of the possible fee. If no suitable new slot can be found, do not cancel the old appointment \u2014 instead inform the patient and offer to transfer them to the front desk. Then book the new appointment with book_appointment.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-03",
+        "root_cause": "No instructions exist for what the agent should do when any tool call returns an error or unexpected result.",
+        "impact_if_unfixed": "Silent failures leave patients with incorrect beliefs about their appointment status, causing missed appointments and patient harm.",
+        "fix_description": "Add a general error handling instruction after the tools list.",
+        "original_text": "Tools available: find_patient, find_appointment, get_available_slots, book_appointment, cancel_appointment, confirm_appointment, transfer_call, send_sms, end_call",
+        "replacement_text": "Tools available: find_patient, find_appointment, get_available_slots, book_appointment, cancel_appointment, confirm_appointment, transfer_call, send_sms, end_call\n\nIf any tool call returns an error or fails to return expected data, do not tell the patient the action was completed. Instead say \"I am sorry, I encountered a technical issue and was unable to complete that for you. Let me connect you with our front desk team who can assist you directly.\" Then use transfer_call to front_desk.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-04",
+        "root_cause": "get_available_slots has no end_date parameter, so the search window cannot be constrained by the agent.",
+        "impact_if_unfixed": "The tool returns a server-default window that may span months, making the two-option presentation and 30-day availability check unreliable.",
+        "fix_description": "Instruct the agent to interpret the returned slots and only present options within the intended window, and to determine no-availability based on whether returned slots fall within 30 days of today.",
+        "original_text": "If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives.",
+        "replacement_text": "If there are no available slots at all for their preferred provider within 30 days of today's date, let them know and offer alternatives. When presenting options from get_available_slots results, only offer slots that fall within the patient's requested timeframe and ignore any results that fall beyond the intended window.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-05",
+        "root_cause": "The prompt instructs the agent to record a waitlist entry but no tool exists for this purpose.",
+        "impact_if_unfixed": "The agent will either hallucinate a capability or fail silently, and patient waitlist requests will never be recorded.",
+        "fix_description": "Replace the waitlist instruction with a transfer to front desk, which is the only available mechanism to record a waitlist request.",
+        "original_text": "offer to put them on a waitlist \u2014 take their preferred provider, date range, and time of day preference and make a note.",
+        "replacement_text": "offer to transfer them to the front desk team who can add them to a waitlist. Say \"I can connect you with our front desk team and they will add you to the waitlist for your preferred provider.\" Then use transfer_call to front_desk.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-05",
+        "root_cause": "Second occurrence of waitlist instruction with same problem.",
+        "impact_if_unfixed": "Same as above \u2014 patient waitlist requests will not be recorded.",
+        "fix_description": "Replace the second waitlist mention with a front desk transfer instruction.",
+        "original_text": "Would you like to try Dr. Patel instead, or would you prefer to be added to the waitlist for Dr. Chen?\"",
+        "replacement_text": "Would you like to try Dr. Patel instead, or would you like me to transfer you to our front desk team to be added to the waitlist for Dr. Chen?\"",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-07",
+        "root_cause": "The cancellation workflow has no send_sms step, so patients receive no written confirmation of their cancellation.",
+        "impact_if_unfixed": "Patients may dispute cancellations or remain uncertain whether their appointment was actually canceled.",
+        "fix_description": "Add a send_sms instruction with message_type appointment_cancelled after the cancel_appointment step.",
+        "original_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your follow-up visit with Dr. Chen on Thursday June 8th at 11 AM. Is that right?\" If they say yes, use cancel_appointment.",
+        "replacement_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your follow-up visit with Dr. Chen on Thursday June 8th at 11 AM. Is that right?\" If they say yes, use cancel_appointment. Then use send_sms with message_type \"appointment_cancelled\" to send them a cancellation confirmation.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-08",
+        "root_cause": "The find_patient phone parameter has no format specification, and {{user_number}} may arrive in a format that does not match the EHR.",
+        "impact_if_unfixed": "Phone-based lookup will silently fail on what may be the last verification attempt before transferring the patient.",
+        "fix_description": "Instruct the agent to use the 10-digit format (digits only, no country code or punctuation) when passing a phone number to find_patient.",
+        "original_text": "ask if the phone number they are calling from is the one on file or if there is a different number. Try again with the phone number.",
+        "replacement_text": "ask if the phone number they are calling from is the one on file or if there is a different number. When passing a phone number to find_patient, use 10 digits only with no spaces, dashes, parentheses, or country code (for example, 8605550142). If using {{user_number}}, strip any leading +1 or formatting before passing it to the tool. Try again with the phone number.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-09",
+        "root_cause": "The agent is never instructed to check the last_visit_date returned by find_patient and apply the 3-year new patient rule.",
+        "impact_if_unfixed": "Patients not seen in over 3 years will be scheduled for follow-ups instead of new patient visits, causing clinical and billing issues.",
+        "fix_description": "Add an explicit instruction to check last_visit_date after find_patient and apply the 3-year rule.",
+        "original_text": "If they are an existing patient, you need to verify their identity. Ask for their first name. Then ask for their last name. Then ask for their date of birth. Use find_patient to look them up. If you find one match, great, move on.",
+        "replacement_text": "If they are an existing patient, you need to verify their identity. Ask for their first name. Then ask for their last name. Then ask for their date of birth. Use find_patient to look them up. If you find one match, check the last_visit_date returned. If the last visit was more than 3 years before today's date, treat this patient as a new patient and follow the new patient routing instructions. Otherwise, move on.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-10",
+        "root_cause": "The scheduling workflow does not instruct the agent to call find_appointment to count existing upcoming appointments before booking.",
+        "impact_if_unfixed": "Patients with 3 existing appointments can be booked a 4th, violating the business rule.",
+        "fix_description": "Add an instruction to call find_appointment and count upcoming appointments before proceeding with scheduling.",
+        "original_text": "Ok so once you have verified the patient, ask them what they need the appointment for.",
+        "replacement_text": "Ok so once you have verified the patient, use find_appointment to retrieve their upcoming appointments and count them. If they already have 3 or more upcoming appointments, say \"I can see you already have 3 upcoming appointments scheduled. We can only hold 3 at a time. Would you like to cancel one of your existing appointments to make room, or would you prefer to speak with our front desk?\" Do not proceed with scheduling until they are under the limit. Then ask them what they need the appointment for.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-11",
+        "root_cause": "The prompt never instructs the agent to set late_cancel: true in the cancel_appointment call when canceling within 24 hours.",
+        "impact_if_unfixed": "Billing will not be flagged for chargeable late cancellations, causing revenue loss.",
+        "fix_description": "Add an explicit instruction to pass late_cancel: true when canceling within 24 hours of the appointment.",
+        "original_text": "Say something like \"I can certainly cancel that for you. I do want to let you know that since the appointment is within 24 hours, there may be a late cancellation fee per our office policy. Would you still like to proceed with the cancellation?\"",
+        "replacement_text": "Say something like \"I can certainly cancel that for you. I do want to let you know that since the appointment is within 24 hours, there may be a late cancellation fee per our office policy. Would you still like to proceed with the cancellation?\" If they confirm, call cancel_appointment with late_cancel set to true.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-13",
+        "root_cause": "No explicit instruction prevents calling get_available_slots for Dr. Patel during her maternity leave window.",
+        "impact_if_unfixed": "If the scheduling system has not blocked her slots, the agent may book patients with Dr. Patel while she is on leave.",
+        "fix_description": "Add an explicit check: before calling get_available_slots for Dr. Patel, verify the requested date is outside her leave period.",
+        "original_text": "She is on maternity leave starting March 15 2026 and returning June 1 2026. During her leave, her patients should be scheduled with Dr. Chen.",
+        "replacement_text": "She is on maternity leave starting March 15 2026 and returning June 1 2026. During her leave, her patients should be scheduled with Dr. Chen. Do not call get_available_slots for Dr. Patel for any dates between March 15 2026 and May 31 2026 inclusive. If a requested appointment date falls in that range, treat her as unavailable and offer Dr. Chen instead.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-14",
+        "root_cause": "Provider IDs and location IDs are never defined in the prompt, so the agent must hallucinate values for required tool fields.",
+        "impact_if_unfixed": "Every call to get_available_slots and book_appointment will fail due to invalid or missing provider_id and location_id values.",
+        "fix_description": "Add an ID mapping table for providers and locations so the agent can pass correct values to the tools.",
+        "original_text": "Our providers are:",
+        "replacement_text": "Provider and location IDs for use with get_available_slots and book_appointment:\n- Dr. Sarah Chen: provider_id \"PROV-CHEN\"\n- Dr. Michael Torres: provider_id \"PROV-TORRES\"\n- Dr. Priya Patel: provider_id \"PROV-PATEL\"\n- NP Jessica Nguyen: provider_id \"PROV-NGUYEN\"\n- Dr. Robert Kim: provider_id \"PROV-KIM\"\n- Dr. Amanda Foster: provider_id \"PROV-FOSTER\"\n- Dr. James Wright: provider_id \"PROV-WRIGHT\"\n- PA Marcus Davis: provider_id \"PROV-DAVIS\"\n- Main Office: location_id \"LOC-MAIN\"\n- West Hartford Branch: location_id \"LOC-WESTHARTFORD\"\n- Glastonbury Office: location_id \"LOC-GLASTONBURY\"\n\nOur providers are:",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-16",
+        "root_cause": "The agent is not explicitly instructed to derive today's date from {{current_time_America/New_York}} and use it as the start_date for urgent visit slot searches.",
+        "impact_if_unfixed": "The agent may pass an incorrect or future date when searching for urgent visit slots, allowing advance booking of same-day-only appointments.",
+        "fix_description": "Add an explicit instruction to use today's date derived from {{current_time_America/New_York}} as the start_date when booking urgent visits, and to only offer slots returned for that date.",
+        "original_text": "Urgent Visit: 15 minutes. Same-day only. Can only be booked with PA Marcus Davis. For issues that need immediate attention but are not emergencies (high fever, severe pain, possible fractures, deep cuts, allergic reactions). If no urgent slots available today, recommend the patient go to an urgent care facility or emergency room depending on severity. Cannot be scheduled in advance.",
+        "replacement_text": "Urgent Visit: 15 minutes. Same-day only. Can only be booked with PA Marcus Davis. For issues that need immediate attention but are not emergencies (high fever, severe pain, possible fractures, deep cuts, allergic reactions). If no urgent slots available today, recommend the patient go to an urgent care facility or emergency room depending on severity. Cannot be scheduled in advance. When searching for urgent visit slots, derive today's date from {{current_time_America/New_York}} and use it as the start_date in DD-MM-YYYY format. Only present slots from the results that fall on today's date.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-15",
+        "root_cause": "No tool returns ordering provider data, so the lab review ordering provider rule cannot be enforced from system data.",
+        "impact_if_unfixed": "The rule is entirely unenforceable; patients can be scheduled with the wrong provider for lab reviews.",
+        "fix_description": "Acknowledge the limitation and instruct the agent to ask the patient which provider ordered the labs, then schedule accordingly.",
+        "original_text": "Lab review appointments have to be with the doctor who ordered the labs. If they say \"I want to review my bloodwork with Dr. Torres\" but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.",
+        "replacement_text": "Lab review appointments have to be with the doctor who ordered the labs. Always ask the patient \"Which provider ordered the labs you would like to review?\" Use their answer to determine the correct provider. If they request a different provider than the one who ordered the labs, let them know and schedule with the ordering provider instead. If the patient does not know who ordered the labs, offer to transfer them to the nurse line to confirm before scheduling.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-18",
+        "root_cause": "The prompt instructs the agent to put referring provider name in the notes field instead of the dedicated referring_provider parameter in book_appointment.",
+        "impact_if_unfixed": "Referring provider data is stored as unstructured text in notes instead of the structured field, breaking downstream reporting and referral tracking.",
+        "fix_description": "Change the instruction to use the referring_provider field instead of the notes field.",
+        "original_text": "If a patient says they were referred by another doctor, make a note of the referring provider's name when booking. Include it in the notes field.",
+        "replacement_text": "If a patient says they were referred by another doctor, record the referring provider's name in the referring_provider field when calling book_appointment.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-19",
+        "root_cause": "The confirm appointment workflow does not instruct the agent to send an SMS confirmation after confirm_appointment succeeds.",
+        "impact_if_unfixed": "Patients who call to confirm do not receive written confirmation, undermining trust and leading to no-shows.",
+        "fix_description": "Add a send_sms instruction with message_type appointment_confirmed after confirm_appointment.",
+        "original_text": "use confirm_appointment and say \"Your appointment has been confirmed. We look forward to seeing you.\"",
+        "replacement_text": "use confirm_appointment, then use send_sms with message_type \"appointment_confirmed\" to send them a written confirmation, and say \"Your appointment has been confirmed. We look forward to seeing you.\"",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-20",
+        "root_cause": "The 6-month advance booking limit has no enforcement mechanism tied to the available tools or the current date.",
+        "impact_if_unfixed": "Appointments may be booked more than 6 months out, violating the business rule.",
+        "fix_description": "Instruct the agent to derive the 6-month cutoff date from {{current_time_America/New_York}} and reject any slot that falls beyond it.",
+        "original_text": "Do not schedule appointments more than 6 months in advance.",
+        "replacement_text": "Do not schedule appointments more than 6 months in advance. Derive today's date from {{current_time_America/New_York}} and calculate the date 6 months from today. If a patient requests a date beyond that cutoff, or if get_available_slots returns slots beyond that cutoff, do not offer or book those slots. Inform the patient: \"I am unable to schedule appointments more than 6 months in advance. The earliest I can book is within that window.\"",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-21",
+        "root_cause": "The rescheduling workflow does not instruct the agent to use the appointment_rescheduled message_type in send_sms, so the agent defaults to appointment_booked.",
+        "impact_if_unfixed": "Patients receive a misleading confirmation that omits context about the canceled prior appointment.",
+        "fix_description": "Add an explicit send_sms instruction with message_type appointment_rescheduled at the end of the rescheduling workflow.",
+        "original_text": "If the patient wants to change from in-person to telehealth or telehealth to in-person, check that the visit type supports telehealth first. If it does not (like a physical or procedure), let them know it has to be in-person.",
+        "replacement_text": "After booking the new appointment, use send_sms with message_type \"appointment_rescheduled\" to send the patient a confirmation of the rescheduled appointment.\n\nIf the patient wants to change from in-person to telehealth or telehealth to in-person, check that the visit type supports telehealth first. If it does not (like a physical or procedure), let them know it has to be in-person.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "WA-22",
+        "root_cause": "The prompt never instructs the agent to set the cancelled_by field in cancel_appointment, so all cancellations are missing patient attribution.",
+        "impact_if_unfixed": "Billing and audit records cannot distinguish patient-initiated cancellations from provider or office cancellations.",
+        "fix_description": "Add an instruction to always set cancelled_by to 'patient' when processing patient-initiated cancellations.",
+        "original_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your follow-up visit with Dr. Chen on Thursday June 8th at 11 AM. Is that right?\" If they say yes, use cancel_appointment. Then use send_sms with message_type \"appointment_cancelled\" to send them a cancellation confirmation.",
+        "replacement_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your follow-up visit with Dr. Chen on Thursday June 8th at 11 AM. Is that right?\" If they say yes, use cancel_appointment with cancelled_by set to \"patient\". Then use send_sms with message_type \"appointment_cancelled\" to send them a cancellation confirmation.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "PE-02",
+        "root_cause": "Only two generic phrases are defined for upset patients with no escalation path for callers who remain distressed.",
+        "impact_if_unfixed": "Persistently distressed or escalated callers have nowhere to go and may disengage or harm the practice's reputation.",
+        "fix_description": "Add a brief escalation path for callers whose distress is not resolved by the standard empathy phrases.",
+        "original_text": "If the patient gets frustrated or seems upset, say \"I understand\" or \"I apologize for the inconvenience\" and try to help them.",
+        "replacement_text": "If the patient gets frustrated or seems upset, say \"I understand\" or \"I apologize for the inconvenience\" and try to help them. If they remain distressed after you have attempted to help, or if they are frightened, panicked, or persistently angry, say \"I am sorry you are going through this. Let me connect you with a member of our team who can assist you further.\" Then use transfer_call to front_desk.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "PE-05",
+        "root_cause": "A blanket prohibition on contractions makes the agent sound robotic and cold, particularly during empathetic moments.",
+        "impact_if_unfixed": "Patients experience an unnatural, stilted interaction that undermines the warm and professional tone the prompt aims for.",
+        "fix_description": "Soften the instruction to allow natural contractions in conversational speech while maintaining professionalism.",
+        "original_text": "Do not use contractions like \"I'm\" or \"can't\". Say \"I am\" and \"cannot\".",
+        "replacement_text": "Speak naturally and professionally. You may use common contractions in casual conversational moments, but avoid overly informal speech. For example, prefer \"I cannot\" over \"can't\" in formal statements, but natural phrasing like \"I'll connect you\" is acceptable.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "PE-06",
+        "root_cause": "Provider biographical details are included but no guidance is given on when or how to use them conversationally.",
+        "impact_if_unfixed": "The agent either never uses the information or dumps it unprompted, both of which are poor patient experiences.",
+        "fix_description": "Add a brief instruction on when to offer provider background details \u2014 specifically when a patient is undecided or asks for a recommendation.",
+        "original_text": "If they do not have a provider preference, suggest an appropriate provider based on the appointment type.",
+        "replacement_text": "If they do not have a provider preference, suggest an appropriate provider based on the appointment type. If a patient seems undecided or asks for a recommendation, you may briefly share relevant background about a provider to help them choose \u2014 for example their years of experience, a specialty relevant to the patient's need, or languages they speak. Do not recite all provider details unprompted; only share what is relevant to the patient's situation.",
+        "is_addition": false,
+        "insertion_after": null
+      },
+      {
+        "issue_id": "PE-11",
+        "root_cause": "The cancellation fee warning is scripted as a policy recitation delivered regardless of context or the patient's emotional state.",
+        "impact_if_unfixed": "Patients canceling due to illness or emergencies experience the warning as cold and punitive, damaging the patient relationship.",
+        "fix_description": "Add an instruction to acknowledge the patient's situation with empathy before stating the policy, especially when a hardship reason is given.",
+        "original_text": "Say something like \"I can certainly cancel that for you. I do want to let you know that since the appointment is within 24 hours, there may be a late cancellation fee per our office policy. Would you still like to proceed with the cancellation?\"",
+        "replacement_text": "If the patient offers a reason for the late cancellation such as illness or a family emergency, first acknowledge their situation with empathy \u2014 for example \"I am sorry to hear that\" or \"I hope you feel better soon.\" Then say \"I can certainly take care of that cancellation for you. I do want to let you know that since the appointment is within 24 hours, there may be a late cancellation fee per our office policy. Would you still like to proceed?\"",
+        "is_addition": false,
+        "insertion_after": null
+      }
+    ]
+  },
+  "selected_issues": [
+    "WA-01",
+    "WA-02",
+    "WA-03",
+    "WA-04",
+    "WA-05",
+    "WA-07",
+    "WA-08",
+    "WA-09",
+    "WA-10",
+    "WA-11",
+    "WA-13",
+    "WA-14",
+    "WA-16",
+    "WA-15",
+    "WA-18",
+    "WA-19",
+    "WA-20",
+    "WA-21",
+    "WA-22",
+    "PE-02",
+    "PE-05",
+    "PE-06",
+    "PE-11"
+  ],
+  "verdicts": [
+    {
+      "issue_id": "WA-01",
+      "scenario_description": "Patient requests appointment scheduling, triggering the agent to call get_available_slots with incorrect date format",
+      "user_message": "Hi, I'd like to book an appointment with Dr. Smith for sometime next week, starting from Monday the 13th of January.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI want to help you get that appointment scheduled. I do want to let you know that we do not have a Dr. Smith on our provider team. Our providers include Dr. Sarah Chen, Dr. Michael Torres, Dr. Priya Patel, NP Jessica Nguyen, Dr. Robert Kim, Dr. Amanda Foster, Dr. James Wright, and PA Marcus Davis.\n\nWould any of those providers work for you, or is it possible you may have the name slightly different than what you were thinking?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to help you schedule an appointment! I do want to let you know that we don't have a Dr. Smith on our provider team. Our providers include Dr. Sarah Chen, Dr. Michael Torres, Dr. Priya Patel, NP Jessica Nguyen, Dr. Robert Kim, Dr. Amanda Foster, Dr. James Wright, and PA Marcus Davis.\n\nWould any of those providers work for you, or is it possible you may be thinking of a different name?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix description targets a specific technical issue: formatting start_date as DD-MM-YYYY when calling get_available_slots. However, neither response actually calls get_available_slots at this stage \u2014 both responses correctly identify that 'Dr. Smith' is not in the provider list and ask the caller to clarify before proceeding. The two responses are functionally identical in behavior; the only differences are minor cosmetic rewording ('I want to help you' vs 'I'd be happy to help you', 'is it possible you may have the name slightly different' vs 'is it possible you may be thinking of a different name'). The root cause date formatting issue cannot be demonstrated or tested in this scenario because the agent never reaches the point of calling get_available_slots \u2014 the unknown provider name stops the workflow first. No actual change in scheduling logic or date formatting behavior is visible.",
+      "remaining_concerns": "The date format fix (DD-MM-YYYY for get_available_slots) is not demonstrated in either response. The scenario doesn't advance far enough to trigger the tool call where the bug would manifest. The fix may exist in the underlying prompt/workflow instructions, but it cannot be evaluated from these responses alone."
+    },
+    {
+      "issue_id": "WA-02",
+      "scenario_description": "Patient requests rescheduling but no alternative slots are available, triggering premature cancellation",
+      "user_message": "Hi, I need to reschedule my appointment with Dr. Patel that's this Thursday at 2pm \u2014 can you move it to sometime next Friday instead?",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you reschedule your appointment with Dr. Patel. First, I need to verify your identity. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to help you reschedule that appointment. First, I need to verify your identity. Could I get your first name please?",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "Both responses are functionally identical \u2014 they greet the caller, offer to help with rescheduling, and ask for the caller's first name for identity verification. The only difference is a trivial rewording ('I would be happy' vs 'I'd be happy' and 'First, I need to verify your identity' vs 'First, I need to verify your identity'). The core workflow fix \u2014 checking for available slots before canceling the existing appointment \u2014 is not demonstrated at all in either response. Both responses are at the same early stage of the interaction (identity verification) and neither shows any scheduling logic. The fix described (reversing the cancellation order) would only manifest later in the workflow when slots are actually being searched and appointments modified, which this exchange never reaches.",
+      "remaining_concerns": "The actual fix for WA-02 cannot be evaluated from these responses because both stop at the identity verification step. The critical workflow difference (find new slot before canceling old appointment) would need to be demonstrated in a scenario where the agent actually attempts to find and book the new slot, especially in the failure case where no slots are available."
+    },
+    {
+      "issue_id": "WA-03",
+      "scenario_description": "Patient calls to confirm appointment but the lookup tool fails silently",
+      "user_message": "Hi, I just want to make sure my appointment is still on for tomorrow morning \u2014 can you look that up for me? My name is Sandra Kowalski.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to confirm your upcoming appointment \u2014 I am happy to help with that, Sandra. I just need to verify a couple of details first.\n\nCould you please provide me with your last name? Oh, you did mention it \u2014 Kowalski. And could you please provide me with your date of birth?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to look that up for you, Sandra! I just need to verify a couple of details first. Could you please provide me with your last name \u2014 I have Kowalski \u2014 and your date of birth?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The scenario requires the agent to handle a silent tool failure gracefully \u2014 informing the patient when a lookup fails rather than leaving them with incorrect beliefs about their appointment. Neither response actually demonstrates error handling behavior. Both responses are pre-lookup verification steps (collecting date of birth), and neither shows what happens when the tool fails. The 'fix' only rewrites the greeting and verification request in a slightly more natural way, but does not address the root cause at all: there is still no instruction or behavior demonstrated for what the agent should do when the tool returns an error or unexpected result. The fixed response would still silently fail in the same way as the original if the lookup tool encounters an error.",
+      "remaining_concerns": "The core issue is completely unresolved. The fix needed was adding error handling instructions to the system prompt so the agent communicates tool failures to patients (e.g., 'I'm having trouble accessing your appointment right now, please call back or I'll transfer you'). The cosmetic rewrite of the verification step does nothing to address silent failures."
+    },
+    {
+      "issue_id": "WA-04",
+      "scenario_description": "Patient asks for earliest available appointment, triggering slot retrieval that may return options far outside the 30-day window, causing the agent to incorrectly present or accept distant future slots as 'available'",
+      "user_message": "Hi, I'd like to book the earliest appointment possible with any available doctor \u2014 I just need to be seen as soon as I can.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you need to be seen as soon as possible. I would be happy to help you find the earliest available appointment. \n\nFirst, could you tell me a little about what is going on? For example, are you feeling sick, do you need a follow-up, or is it something else? That will help me find the right provider and appointment type for you.",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you need to be seen as soon as possible \u2014 I am happy to help with that. To get started, could you tell me a little more about what is going on? For example, are you feeling sick, do you need a follow-up, or is it something else? That will help me figure out the best appointment type and provider for you.",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "Both responses are functionally identical \u2014 they ask the caller for more information about their reason for visiting before retrieving any slots. Neither response actually demonstrates the fix described in the issue. The fix was supposed to address how the agent interprets returned slots from get_available_slots, filters them to a 30-day window, and presents only options within that window. However, neither response has reached the point of retrieving or presenting slots at all. The 'fixed' response is merely a cosmetic rewording of the original with negligible differences ('I am happy to help with that' vs 'I would be happy to help you find the earliest available appointment'). The root cause \u2014 how the agent handles slot retrieval and filters results to a 30-day window \u2014 is not demonstrated as resolved in either response since the conversation hasn't progressed to that stage.",
+      "remaining_concerns": "The actual fix behavior (filtering returned slots to 30-day window, presenting only 2 options within that window, and determining no-availability if no slots fall within 30 days) is not demonstrated in either response. The comparison point chosen does not allow evaluation of whether the fix was actually implemented."
+    },
+    {
+      "issue_id": "WA-05",
+      "scenario_description": "Patient calls to request being added to a cancellation waitlist for an earlier appointment",
+      "user_message": "Hi, I already have an appointment scheduled but I was wondering if I could be put on the cancellation list in case something opens up sooner \u2014 I'm really hoping to get in earlier if possible.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to be added to a cancellation list for an earlier appointment. I would be happy to help you with that. I will need to verify your identity first.\n\nCould I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you with that! I do want to let you know that I am not able to manage a cancellation waitlist directly, but I can connect you with our front desk team \u2014 they would be the ones to add you to that list.\n\nBefore I transfer you, may I ask \u2014 would you also like me to pull up your existing appointment to confirm the details, or would you just like me to go ahead and connect you with the front desk?",
+      "improvement_detected": true,
+      "improvement_score": 8,
+      "explanation": "The fix clearly addresses the root cause: the original response was incorrectly offering to manage a cancellation waitlist directly (which the agent cannot do), while the fixed response transparently acknowledges this limitation and redirects the caller to the front desk team who can actually handle the request. This is a meaningful behavioral change \u2014 the agent no longer makes a false promise to add the patient to a waitlist. The fixed response also offers a helpful additional option (confirming existing appointment details) before the transfer, which is appropriate and natural for a phone call.",
+      "remaining_concerns": "The fixed response still opens with the greeting 'Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?' even though the caller has already stated their request. This creates a slight conversational awkwardness where the agent asks 'How can I help you?' and then immediately addresses the request \u2014 though this may be a scripted greeting structure and not a new issue introduced by the fix. The core waitlist handling issue is resolved."
+    },
+    {
+      "issue_id": "WA-05",
+      "scenario_description": "Patient explicitly asks to be added to a cancellation waitlist for an earlier appointment",
+      "user_message": "I just scheduled an appointment but the next available slot is really far out. Is there any way to put me on a waitlist in case something opens up sooner?",
+      "original_response": "I would be happy to add you to our waitlist! We do keep a waitlist for earlier openings, and we will give you a call if something comes up sooner.\n\nTo get you set up, I will need to verify your identity first. Could I get your first name?",
+      "fixed_response": "I would be happy to help you with that! Unfortunately, I am not able to manage the waitlist directly, but our front desk team can add you to one for your preferred provider.\n\nWould you like me to transfer you to the front desk so they can get you set up on the waitlist?",
+      "improvement_detected": true,
+      "improvement_score": 8,
+      "explanation": "The original response falsely promised to add the patient to a waitlist and began collecting personal information, which it apparently cannot actually do. The fixed response correctly acknowledges the limitation, redirects to the front desk team who can actually handle the request, and offers a concrete next step (transfer). This directly addresses the root cause: the agent was making promises it couldn't fulfill and collecting data for a process it couldn't complete.",
+      "remaining_concerns": "The fixed response is slightly abrupt \u2014 it doesn't acknowledge that the patient already has an appointment scheduled or validate their frustration with the wait time. A warmer opener could improve caller experience, but this is a minor stylistic concern, not a functional issue."
+    },
+    {
+      "issue_id": "WA-07",
+      "scenario_description": "Patient requests appointment cancellation and expects written confirmation",
+      "user_message": "Hi, I need to cancel my appointment scheduled for this Thursday. Can you make sure I get a text message confirming it's been cancelled so I have proof?",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can absolutely help you cancel your appointment and send you a confirmation text. I will just need to verify your identity first.\n\nCould I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can absolutely help you cancel your appointment and send you a text confirmation. I just need to verify your identity first. Could I get your first name?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses are functionally identical \u2014 they both promise to send a text confirmation and ask for the caller's first name to verify identity. The 'fix' only made cosmetic wording changes: 'I will just need' became 'I just need', and 'a confirmation text' became 'a text confirmation'. The actual issue (WA-07) requires adding a send_sms step with message_type appointment_cancelled after the cancel_appointment step in the workflow. This is a backend workflow change, not something visible in the greeting/identity-verification portion of the conversation. Neither response demonstrates that the SMS will actually be sent \u2014 both merely promise it verbally. Since the root cause is a missing workflow step, the fix should manifest as the agent completing the cancellation AND actually triggering an SMS, which cannot be evaluated from this early-stage response alone. However, the responses are substantively identical, so no meaningful improvement is demonstrated.",
+      "remaining_concerns": "The actual fix (adding send_sms instruction to the cancellation workflow) is not demonstrable in this portion of the conversation. The two responses are cosmetically different but functionally identical. There is no evidence the backend workflow change was implemented."
+    },
+    {
+      "issue_id": "WA-08",
+      "scenario_description": "Patient calls in with phone number in E.164/international format with country code and formatting characters",
+      "user_message": "Hi, I need to check on my upcoming appointment. My name is Sandra Torres and my phone number on file should be +1 (602) 555-0147.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you check on your upcoming appointment, Sandra. I just need to verify a few details first. Could you please provide me with your date of birth?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to help you check on your upcoming appointment, Sandra. Let me pull up your information. Could I please get your date of birth?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses are functionally identical - they both ask Sandra for her date of birth as the next step without attempting to look up her account using the phone number she just provided. The core issue (formatting the phone number correctly as 10 digits before passing it to find_patient) is not demonstrated in either response. The fix description says the agent should strip the E.164 format '+1 (602) 555-0147' down to '6025550147' when calling find_patient, but neither response shows any phone lookup being attempted at all. The only differences between the two responses are minor cosmetic rewording ('I would be happy' vs 'I'd be happy', 'I just need to verify a few details first' vs 'Let me pull up your information'). The root cause - silently failing phone-based lookup due to format mismatch - cannot be evaluated from these text responses alone, but there is no evidence the backend behavior changed either.",
+      "remaining_concerns": "The actual fix needs to be demonstrated by the agent attempting the find_patient lookup using the reformatted 10-digit number (6025550147) before asking for additional verification. Neither response shows this behavior. The fix may have been applied at the tool-calling layer but is invisible in the surface text, or it may not have been applied at all."
+    },
+    {
+      "issue_id": "WA-09",
+      "scenario_description": "Long-absent patient calling to schedule an appointment after more than 3 years away",
+      "user_message": "Hi, I used to be a patient there a while back \u2014 it's been maybe four or five years since I last came in. I'd like to get back in and see the doctor. Can you get me scheduled?",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to schedule an appointment \u2014 welcome back! Since it has been four or five years since your last visit, you would need to be seen as a new patient. We consider anyone who has not been seen in over three years to require a new patient visit to get everything updated.\n\nFor new patient registration, I would need to connect you with our front desk team, as they handle setting up new patient accounts. Would you like me to transfer you to the front desk?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to get scheduled for an appointment \u2014 welcome back! Since it has been four or five years, I will need to look you up in our system. Could I start with your first name?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The original response correctly applied the 3-year rule based on the caller's self-reported information (4-5 years away), properly identified them as a new patient, and communicated the policy clearly. The fixed response abandons this correct behavior and instead asks for the patient's name before doing anything \u2014 which delays the correct classification and doesn't demonstrate the fix at all. The fix description says to 'check last_visit_date after find_patient and apply the 3-year rule,' but the fixed response never gets to that point in the conversation. The original response was actually handling the scenario correctly (recognizing 4-5 years > 3 years = new patient visit), even if it was acting on caller-stated information rather than system data. The fixed response regresses by deferring classification entirely, which could lead to the exact problem described in the issue \u2014 if the agent later finds the patient but doesn't properly check last_visit_date and apply the rule. The fix is incomplete and doesn't demonstrate the rule being applied based on system data lookup.",
+      "remaining_concerns": "The fixed response doesn't demonstrate the actual fix (checking last_visit_date from find_patient results). It only shows the initial information-gathering step and provides no evidence that the 3-year rule will be correctly applied after the lookup. The original response was arguably more correct in its outcome, even if it relied on caller-stated data rather than a system lookup."
+    },
+    {
+      "issue_id": "WA-10",
+      "scenario_description": "Patient with 3 existing upcoming appointments tries to schedule a 4th",
+      "user_message": "Hi, I'd like to schedule an appointment with Dr. Johnson for next Tuesday at 2pm if that's available.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you schedule an appointment. I do want to let you know that we do not have a Dr. Johnson on our provider staff. Our current providers include:\n\n- **Dr. Sarah Chen** \u2013 Internal Medicine\n- **Dr. Michael Torres** \u2013 Family Medicine\n- **Dr. Priya Patel** \u2013 Internal Medicine\n- **NP Jessica Nguyen** \u2013 Family Medicine\n- **Dr. Robert Kim** \u2013 Pediatrics\n- **Dr. Amanda Foster** \u2013 OB/GYN\n- **Dr. James Wright** \u2013 Orthopedics\n- **PA Marcus Davis** \u2013 Urgent Care\n\nCould you clarify which provider you were looking for, or would you like me to help match you with the right provider based on what you need the appointment for?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to schedule an appointment \u2014 I'd be happy to help with that! I do want to let you know that we don't have a Dr. Johnson on our provider staff. You may be thinking of one of our other providers. We have:\n\n- **Dr. Sarah Chen** \u2013 Internal Medicine\n- **Dr. Michael Torres** \u2013 Family Medicine\n- **Dr. Priya Patel** \u2013 Internal Medicine\n- **NP Jessica Nguyen** \u2013 Family Medicine\n- **Dr. Robert Kim** \u2013 Pediatrics\n- **Dr. Amanda Foster** \u2013 OB/GYN\n- **Dr. James Wright** \u2013 Orthopedics\n- **PA Marcus Davis** \u2013 Urgent Care\n\nDo any of those sound familiar, or would you like me to help you figure out which provider might be the best fit for what you need?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix description states the issue is that the agent should call find_appointment to count existing upcoming appointments before proceeding with scheduling, to enforce the 3-appointment limit. Neither the original nor the fixed response demonstrates this behavior. Both responses focus on the 'Dr. Johnson not found' issue and list available providers. The actual fix \u2014 checking existing appointments before booking \u2014 is completely absent from the fixed response. The only change between the two responses is minor rewording and tone polish (e.g., 'It sounds like you'd like to schedule an appointment' vs diving straight in, and 'Do any of those sound familiar' vs 'Could you clarify'). The root cause issue of not checking appointment count before scheduling is not addressed at all in the fixed response.",
+      "remaining_concerns": "The core issue remains entirely unresolved. The agent still does not call find_appointment to verify the patient's existing appointment count before proceeding. The fix applied appears to be only cosmetic rewording with no functional change to the scheduling workflow."
+    },
+    {
+      "issue_id": "WA-11",
+      "scenario_description": "Patient calls to cancel appointment scheduled for later today or tomorrow, triggering a same-day/within-24-hour cancellation",
+      "user_message": "Hi, I need to cancel my appointment that's scheduled for 3pm today. Something came up at work and I just can't make it.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can help you cancel that appointment. I will just need to verify your identity first. Can I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can help you with that cancellation. I'll just need to verify your identity first. Could I get your first name please?",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "The two responses are functionally identical. The only differences are minor wording changes ('I will just need' vs 'I'll just need', 'Can I get' vs 'Could I get'). Neither response demonstrates that the agent will actually pass late_cancel: true when making the cancel_appointment API call. The fix described in the issue is about backend behavior during the cancellation call, but neither response shows any change in how the agent handles the late cancellation logic. At this point in the conversation, the agent is still in identity verification mode, so the critical behavior (flagging the cancellation as late) would only manifest later when the actual cancel_appointment function is invoked. The 'fixed' response provides no evidence that the underlying instruction was actually added to the prompt.",
+      "remaining_concerns": "The root cause \u2014 missing late_cancel: true flag in the cancel_appointment call \u2014 is not demonstrated as fixed. The response shown is just the greeting/identity verification step, which is identical in both versions. The actual fix would need to be verified at the point where cancel_appointment is called with the appropriate parameter."
+    },
+    {
+      "issue_id": "WA-13",
+      "scenario_description": "Patient requests appointment with Dr. Patel during her maternity leave period",
+      "user_message": "Hi, I'd like to schedule an appointment with Dr. Patel for next Tuesday if possible \u2014 she's been my doctor for years and I really prefer to see her.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you schedule an appointment with Dr. Patel. Before I look into availability, I do need to let you know about a situation with her schedule.\n\nDr. Patel is currently on maternity leave and will not be returning until June 1st, 2026. We apologize for any inconvenience this may cause.\n\nIn the meantime, we would love to get you taken care of. Dr. Sarah Chen is our other Internal Medicine physician and she has been with the practice for 12 years. She has an excellent reputation \u2014 a 4.9 star patient satisfaction rating \u2014 and she also speaks Mandarin if that is helpful. She would be a great option to see while Dr. Patel is away.\n\nAlternatively, if you would prefer to wait for Dr. Patel, I can add you to a waitlist for an appointment after June 1st, 2026.\n\nWhich would you prefer \u2014 scheduling with Dr. Chen in the near term, or being added to the waitlist for Dr. Patel?\n\nAlso, to get started with either option, I will need to verify your information. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to schedule an appointment with Dr. Patel \u2014 I'd be happy to help with that! First, I just need to verify your information. Could I get your first name?",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "The fixed response is dramatically worse, not better. The original response correctly identified that Dr. Patel is on maternity leave, informed the patient, and offered alternatives (Dr. Chen or a waitlist). The fixed response completely ignores the maternity leave issue and proceeds as if Dr. Patel is available, asking to verify the patient's information to presumably book with her. This is exactly the problematic behavior the fix was supposed to prevent \u2014 the agent is now heading toward potentially booking an appointment with a doctor who is on leave, without any check or warning. The fix has made the core issue worse, not better.",
+      "remaining_concerns": "The fixed response fails to perform any leave period check before proceeding, does not inform the patient of Dr. Patel's unavailability, and will likely proceed to call get_available_slots for Dr. Patel without verifying the date is outside her leave window. This is a regression from the original behavior."
+    },
+    {
+      "issue_id": "WA-14",
+      "scenario_description": "Patient tries to book an appointment with a specific doctor at a specific clinic location",
+      "user_message": "Hi, I'd like to schedule an appointment with Dr. Sarah Johnson at your downtown location for next Tuesday if possible.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to schedule an appointment \u2014 I am happy to help with that! I do want to let you know that we do not have a provider named Dr. Sarah Johnson at our practice. You may be thinking of Dr. Sarah Chen, who is one of our Internal Medicine physicians. We also do not have a specific \"downtown\" location, but our Main Office is located at five three five Wellness Boulevard, Suite two hundred, Hartford, Connecticut, which may be the location you are thinking of.\n\nDr. Chen does see patients at the Main Office, so if she sounds like the right provider, I can certainly help you get scheduled with her.\n\nBefore we go any further, are you a new patient with our practice, or have you been seen here before?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to schedule an appointment \u2014 I'd be happy to help with that! Just a couple of things to clarify first: we do not have a provider named Dr. Sarah Johnson on our team. We do have a **Dr. Sarah Chen** in Internal Medicine \u2014 is it possible that's who you're thinking of?\n\nAlso, could you let me know which location you had in mind? Our Main Office is located at five three five Wellness Boulevard in Hartford, which may be what you're thinking of as our \"downtown\" location. We also have a West Hartford Branch and a Glastonbury Office.\n\nAre you an existing patient with us, or would this be your first visit?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix description calls for adding an ID mapping table for providers and locations so the agent can pass correct values to tools (get_available_slots, book_appointment). The root cause is that provider_id and location_id values are never defined, causing hallucinated or invalid values to be passed to tools. Neither response demonstrates any actual tool call behavior or correct ID usage. Both responses are conversational clarification steps that occur before any tool call would happen. The 'fixed' response actually introduces a minor change by listing multiple locations (West Hartford Branch and Glastonbury Office) which may be a real improvement in information accuracy, but this has nothing to do with the stated fix. The core issue \u2014 whether the agent now has access to a mapping table that allows it to pass correct provider_id and location_id values to tools \u2014 cannot be evaluated from either response because neither response has reached the point of making a tool call. The responses are nearly functionally identical in terms of the actual problem being addressed.",
+      "remaining_concerns": "The fix cannot be verified from these responses because neither demonstrates actual tool invocation with provider_id or location_id parameters. The stated issue (hallucinated IDs causing tool call failures) would only manifest when the agent actually calls get_available_slots or book_appointment, which hasn't happened yet in either response. The improvement shown (listing multiple locations) may reflect updated prompt content but doesn't demonstrate the core ID mapping fix."
+    },
+    {
+      "issue_id": "WA-16",
+      "scenario_description": "Patient requests urgent same-day visit but agent uses wrong date for slot search",
+      "user_message": "Hi, I need to be seen urgently today, I'm having chest tightness and shortness of breath that started this morning. Can you get me in as soon as possible?",
+      "original_response": "I am very concerned about what you are describing. Chest tightness and shortness of breath can be signs of a serious medical emergency.\n\nPlease hang up right now and call 911 immediately, or have someone drive you to the nearest emergency room. Do not drive yourself.\n\nPlease do not wait to be seen in an office setting for these symptoms. Call 911 right away.",
+      "fixed_response": "I am very concerned about your safety. Chest tightness and shortness of breath can be signs of a serious medical emergency. Please hang up right now and call 911 immediately, or have someone take you to the nearest emergency room. Do not drive yourself.\n\nPlease call 911 now.",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses correctly redirect the caller to 911/emergency services for the reported chest tightness and shortness of breath symptoms, which is the medically appropriate response. However, neither response actually demonstrates the fix described in the issue \u2014 neither response attempts to search for urgent visit slots or shows any date handling logic. The fix was supposed to ensure the agent uses today's date (derived from {{current_time_America/New_York}}) when searching for same-day urgent visit slots. Since both responses skip slot searching entirely due to the emergency nature of the symptoms, the underlying date-handling bug is neither demonstrated nor fixed in these examples. The minor wording changes between the two responses (e.g., 'I am very concerned about what you are describing' vs 'I am very concerned about your safety', removal of the 'do not wait' sentence) are cosmetic and do not address the root cause described in the issue.",
+      "remaining_concerns": "The fix described (using today's date from {{current_time_America/New_York}} as start_date for urgent slot searches) is not demonstrated in either response. The scenario chosen \u2014 chest tightness and shortness of breath \u2014 triggers an emergency redirect in both cases, making it impossible to verify whether the date-handling fix was actually implemented. A different scenario with a less acute urgent need would be required to validate the fix."
+    },
+    {
+      "issue_id": "WA-15",
+      "scenario_description": "Patient requests lab review appointment without specifying which doctor ordered the labs",
+      "user_message": "Hi, I need to schedule a lab review appointment \u2014 I just got my blood work results back and my doctor said I need to come in to go over them.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to schedule a lab review appointment \u2014 I would be happy to help with that. First, I need to verify your information. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you need to schedule a lab review appointment \u2014 I'd be happy to help with that! First, are you an existing patient with us?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix description says the agent should ask the patient which provider ordered the labs, then schedule accordingly. Neither the original nor the fixed response does this. The fixed response changes the identity verification question from 'Could I get your first name?' to 'Are you an existing patient with us?' \u2014 this is a cosmetic difference in the intake flow, not the fix described. The root cause is that the agent needs to ask which provider ordered the labs before scheduling, and the fixed response still does not include this question.",
+      "remaining_concerns": "The fixed response completely omits the required behavior: asking the patient which provider ordered their labs. The change from asking for the patient's name to asking if they're an existing patient does not address the core issue at all. The agent would still proceed to schedule without knowing the ordering provider."
+    },
+    {
+      "issue_id": "WA-18",
+      "scenario_description": "Patient calls to book an appointment and mentions they were referred by a specific doctor",
+      "user_message": "Hi, I'd like to schedule an appointment. My doctor, Dr. Sarah Patel, referred me to see you all for my back pain.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to schedule an appointment \u2014 I would be happy to help with that! Just to clarify, I want to make sure I connect you with the right provider. You mentioned Dr. Sarah Patel referred you \u2014 did you mean **Dr. Priya Patel**, one of our internal medicine providers? Or is Dr. Patel your outside physician who referred you to our practice?\n\nAlso, for back pain, you may be looking to see **Dr. James Wright**, our orthopedic specialist. He does require a referral for new patients, along with prior imaging such as an X-ray or MRI before the first visit.\n\nCould you help me clarify a couple of things:\n\n1. Is Dr. Patel your outside referring physician, or are you an existing patient here at Greenfield Medical Group?\n2. Have you been seen at our practice before?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to schedule an appointment for your back pain \u2014 I'd be happy to help with that! \n\nJust to clarify, you mentioned Dr. Sarah Patel referred you. I want to make sure I have the right provider \u2014 did you mean **Dr. Priya Patel**, our Internal Medicine physician here at Greenfield Medical Group, or is Dr. Patel your outside referring physician?\n\nAlso, are you a new patient with our practice, or have you been seen here before?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix description states the root cause was the agent putting referring provider name in the notes field instead of the dedicated referring_provider parameter in book_appointment. However, neither response shows any actual booking action or tool call \u2014 both responses are still in the information-gathering phase, asking clarifying questions about the provider. There is no evidence in either response that the referring_provider field vs. notes field distinction has been addressed. The fixed response is slightly more concise and removes some unnecessary details about Dr. James Wright and imaging requirements, but this is cosmetic rewording. The actual structural fix \u2014 using referring_provider parameter instead of notes field when calling book_appointment \u2014 cannot be observed in either response since no appointment booking occurs. The underlying data routing issue (structured field vs. unstructured notes) remains unverifiable and likely unaddressed at the prompt instruction level based on what's shown.",
+      "remaining_concerns": "The critical fix \u2014 ensuring the book_appointment tool call uses the referring_provider field rather than the notes field \u2014 is not demonstrated in this response. Both responses are functionally identical in terms of the actual bug: they're gathering information but neither shows the corrected field usage. The fix may exist in the prompt instructions but cannot be verified from these responses alone. Additionally, the fixed response still asks about Dr. Priya Patel when the caller clearly said Dr. Sarah Patel is an external referring physician, which may cause unnecessary confusion."
+    },
+    {
+      "issue_id": "WA-19",
+      "scenario_description": "Patient calls to confirm their upcoming appointment and expects written confirmation",
+      "user_message": "Hi, I'm calling to confirm my appointment for Thursday at 2pm with Dr. Patel. Can you lock that in for me?",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you confirm your appointment. I just need to verify your identity first. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you'd like to confirm an upcoming appointment with Dr. Patel. I'd be happy to help with that! I'll just need to verify your identity first.\n\nCould I get your first name please?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses are at the identical stage of the conversation: greeting the caller and asking for their first name to verify identity. Neither response demonstrates the actual fix described \u2014 sending an SMS confirmation after confirm_appointment succeeds. The 'fixed' response is just a slight rewording of the original with minor stylistic changes (acknowledging the specific appointment detail mentioned by the caller), but the core workflow behavior (send_sms after confirm_appointment) cannot be evaluated at this early stage of the conversation. The fix description requires a backend/workflow change that would only manifest after identity verification and appointment confirmation are completed, which hasn't happened yet in either response.",
+      "remaining_concerns": "The actual fix (send_sms with message_type appointment_confirmed after confirm_appointment) is not demonstrated in either response. This appears to be a workflow/backend change that would occur later in the call flow, making it impossible to evaluate from these initial greeting responses alone. The comparison is essentially between two nearly identical opening responses."
+    },
+    {
+      "issue_id": "WA-20",
+      "scenario_description": "Caller attempts to book an appointment far in the future, beyond the 6-month booking limit",
+      "user_message": "Hi, I'd like to schedule an appointment for my annual checkup on the same date next year \u2014 can you book me in for exactly 12 months from now?",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you schedule your annual physical! I do want to let you know that we can only schedule appointments up to 6 months in advance, so unfortunately I would not be able to book something 12 months out at this time.\n\nWhat I can do is schedule your annual physical within the next 6 months whenever you are ready. Would you like to go ahead and find a date that works for you in that window?\n\nAlso, are you an existing patient with us?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to help you schedule your annual physical! Before I look into availability, I do need to let you know that I'm unable to schedule appointments more than 6 months in advance. So unfortunately, a date 12 months from now would be outside of that window.\n\nWhat I can do is book your physical within the next 6 months. Would you like me to find the soonest available opening, or is there a particular timeframe within the next 6 months that works best for you?\n\nAlso, are you an existing patient with us?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses correctly reject the 12-month booking request by citing the 6-month advance booking limit. The content and behavior are functionally identical. The fix description requires the agent to 'derive the 6-month cutoff date from {{current_time_America/New_York}} and reject any slot that falls beyond it' \u2014 meaning the enforcement mechanism should be computationally grounded in the actual current date. Neither response demonstrates this: both simply recite the policy verbally without any reference to an actual calculated cutoff date. The 'fixed' response is a light reword of the original, with no meaningful change in how the limit is enforced or communicated. The root cause (no enforcement mechanism tied to available tools and current date) remains unaddressed in both responses.",
+      "remaining_concerns": "The fix has not been implemented at the functional level. The agent still relies on a verbal policy statement rather than computing the 6-month cutoff from the current timestamp and enforcing it programmatically. If a caller requests a date that is slightly over 6 months out (e.g., 7 months), there is still no reliable mechanism shown to detect and reject that scenario based on actual date calculation."
+    },
+    {
+      "issue_id": "WA-21",
+      "scenario_description": "Patient calls to reschedule an existing appointment, triggering the rescheduling workflow which incorrectly sends an appointment_booked SMS instead of appointment_rescheduled",
+      "user_message": "Hi, I need to reschedule my appointment that I have on Thursday at 2pm \u2014 something came up at work and I need to move it to Friday if you have anything available.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI would be happy to help you reschedule your appointment. I will just need to verify your identity first. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI'd be happy to help you reschedule that appointment. I just need to verify your identity first. Could I get your first name please?",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "The two responses are functionally identical. Both ask the caller to verify their identity by providing their first name before proceeding with the rescheduling. The only differences are minor wording changes ('I will just need' vs 'I just need', 'I would be happy' vs 'I'd be happy', added 'that appointment'). The actual fix described \u2014 adding an explicit send_sms instruction with message_type appointment_rescheduled at the end of the rescheduling workflow \u2014 is not observable at all in this stage of the conversation. The issue involves what happens at the END of the workflow when the SMS is sent, not at the greeting/identity verification stage. Neither response demonstrates any change in SMS handling behavior, and the cosmetic rewording does not address the root cause.",
+      "remaining_concerns": "The actual fix (using appointment_rescheduled message_type in send_sms) cannot be evaluated from this exchange, as both responses are only at the greeting/identity verification stage. The core issue \u2014 which SMS type gets sent after rescheduling is complete \u2014 remains undemonstrated and unverified."
+    },
+    {
+      "issue_id": "WA-22",
+      "scenario_description": "Patient calling to cancel their own appointment, triggering missing cancelled_by attribution",
+      "user_message": "Hi, I need to cancel my appointment that's scheduled for this Thursday. Something came up at work and I just can't make it.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can help you cancel that appointment. I will just need to verify your identity first. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI can help you cancel that appointment. I'll just need to verify your identity first. Could I get your first name?",
+      "improvement_detected": false,
+      "improvement_score": 1,
+      "explanation": "The fix description states the issue is about setting the 'cancelled_by' field to 'patient' when processing cancellations. However, both responses are functionally identical \u2014 both are asking for the patient's name to verify identity before proceeding. The only differences are minor cosmetic rewording ('I will just need' vs 'I'll just need' and removal of the period at the end). Neither response shows any evidence of the actual fix being applied: setting the cancelled_by field attribution. This is a backend/tool-call behavior that would only manifest when the actual cancellation is processed, not at the identity verification stage. The fix cannot be evaluated from this conversational snippet, and the cosmetic wording changes do not address the root cause at all.",
+      "remaining_concerns": "The actual fix \u2014 ensuring cancelled_by is set to 'patient' when the cancel_appointment tool is called \u2014 cannot be verified from this response. The response shown is only the identity verification step, not the cancellation execution step. The fix may or may not be implemented in the underlying prompt logic, but this response provides no evidence either way."
+    },
+    {
+      "issue_id": "PE-02",
+      "scenario_description": "Persistently distressed caller who is not satisfied with generic empathy phrases and demands further escalation",
+      "user_message": "I already told the last person I spoke to how upset I am, and saying 'I understand' just isn't good enough anymore \u2014 I need to speak to someone who can actually do something about this, like a manager or someone in charge, right now.",
+      "original_response": "I completely understand your frustration, and I am sorry you have had a difficult experience. I want to make sure you get connected with the right person immediately.\n\nLet me transfer you to our office manager right now. Please hold for just a moment.\n\ntransferring to front_desk",
+      "fixed_response": "I completely understand your frustration, and I am sorry you have had a difficult experience. Let me connect you with our front desk team right away \u2014 they can escalate your concern to a manager who can address this directly.\n\nOne moment please.\n\n[transferring to front desk]",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses attempt to escalate the caller to a human, but the 'fixed' response is arguably worse than the original. The original response directly transfers to the 'office manager' which is exactly what the caller demanded \u2014 someone in charge who can do something. The fixed response instead transfers to the 'front desk team' and only promises they 'can escalate' to a manager, adding an extra layer of friction that the caller explicitly does not want. The caller said they already spoke to someone and it wasn't enough \u2014 routing them back through front desk first is the opposite of what the issue fix description called for. The fix description says to add 'a brief escalation path for callers whose distress is not resolved,' but the fixed response actually makes the escalation path longer and less direct. No new meaningful escalation path logic was added; the response was simply reworded with a worse routing outcome.",
+      "remaining_concerns": "The fixed response routes the caller through front desk as an intermediary rather than directly to a manager, which contradicts the caller's explicit demand and the intent of the fix. The original response was more appropriate for this scenario despite its generic opening empathy phrase."
+    },
+    {
+      "issue_id": "PE-05",
+      "scenario_description": "Patient calling in distress about a painful condition, expecting warm empathetic response",
+      "user_message": "I've been in so much pain all week and I just don't know what to do anymore, I'm really scared something is seriously wrong with me.",
+      "original_response": "I am so sorry to hear you are going through that \u2014 that sounds really difficult, and it is completely understandable to feel scared when you are in pain.\n\nBefore we go any further, I want to make sure you are safe. Are you experiencing anything like chest pain, difficulty breathing, severe bleeding, or any other symptoms that feel like a medical emergency right now?",
+      "fixed_response": "I am so sorry to hear you are going through this \u2014 that sounds really difficult, and I completely understand why you would be worried.\n\nI want to make sure I get you the help you need. First, I have to ask \u2014 are you experiencing any symptoms right now like chest pain, difficulty breathing, severe bleeding, or anything that feels like an emergency?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "The fix was supposed to allow natural contractions in conversational speech to make the agent sound warmer and less robotic. However, the fixed response contains zero contractions \u2014 it still uses 'I am,' 'I have,' 'I want,' etc. instead of 'I'm,' 'I've,' 'I want.' The root cause (blanket prohibition on contractions) appears to still be in effect. The changes made are minor rephrasing ('going through that' \u2192 'going through this,' 'it is completely understandable to feel scared' \u2192 'I completely understand why you would be worried') but these are cosmetic rewrites, not the fix described. The specific problem behavior \u2014 stilted speech without contractions \u2014 has not changed at all.",
+      "remaining_concerns": "The fixed response still contains no contractions despite the fix description explicitly stating the goal was to allow natural contractions. The response remains robotic and formal in the exact way the issue described. The fix did not address the root cause."
+    },
+    {
+      "issue_id": "PE-06",
+      "scenario_description": "Patient is undecided between providers and asks for a recommendation, triggering the agent to either ignore useful provider background info or dump all biographical details unprompted",
+      "user_message": "I need to see someone about my anxiety but I'm not sure which doctor to pick \u2014 can you just recommend someone for me? I don't really know the difference between them.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nIt sounds like you would like to schedule an appointment to discuss anxiety \u2014 I am happy to help you with that. I can give you a little guidance on our providers.\n\nFor concerns like anxiety, you would typically want to see one of our **primary care providers** \u2014 either an Internal Medicine or Family Medicine doctor. They can evaluate you, discuss treatment options, and refer you to a specialist like a psychiatrist or therapist if needed.\n\nHere is a quick overview of some good options:\n\n- **Dr. Sarah Chen** (Internal Medicine) \u2014 She has been with the practice for 12 years and has an excellent patient satisfaction rating. Patients frequently mention her thoroughness and great bedside manner. She also speaks Mandarin in addition to English.\n\n- **Dr. Michael Torres** (Family Medicine) \u2014 He has been here for 8 years and is our medical director. He is fluent in English and Spanish.\n\n- **Dr. Priya Patel** (Internal Medicine) \u2014 She has been with the practice for 5 years and specializes in diabetes management and thyroid disorders.\n\n- **NP Jessica Nguyen** (Family Practice) \u2014 She can handle follow-up visits and sick visits, though she would not be the right fit for a first-time visit on a new concern like this.\n\nThat said, before I go further \u2014 are you a **new patient** to our practice, or have you been seen here before?",
+      "fixed_response": "Sure, I'd be happy to help point you in the right direction!\n\nFor anxiety, you would typically want to schedule a follow-up or new patient visit with one of our primary care providers \u2014 either in Internal Medicine or Family Medicine. A few things would help me make the best suggestion:\n\n1. **Are you a new patient to our practice**, or have you been seen here before?\n2. **Do you have any preference for location** \u2014 our Main Office in Hartford, West Hartford, or Glastonbury?\n3. **Is there a particular day of the week or time of day** that works best for you?\n\nThat said, I can share a bit about our providers to help you decide:\n\n- **Dr. Sarah Chen** (Internal Medicine) has been with us for 12 years and has an excellent reputation for thoroughness and bedside manner. She also speaks Mandarin if that is helpful.\n- **Dr. Michael Torres** (Family Medicine) is our medical director with 8 years here, and he is fluent in both English and Spanish.\n- **Dr. Priya Patel** (Internal Medicine) specializes in areas like diabetes and thyroid disorders, so for anxiety specifically she might not be the most targeted fit \u2014 though she is a great physician.\n- **NP Jessica Nguyen** (Family Medicine, DNP from Yale) is also available for follow-up visits if you are an established patient.\n\nFor a **new patient visit**, I would likely lean toward Dr. Chen or Dr. Torres as a starting point. But let me ask \u2014 are you a new or existing patient with us?",
+      "improvement_detected": true,
+      "improvement_score": 6,
+      "explanation": "The fixed response does improve on the original in meaningful ways: it frames provider background details more purposefully by contextualizing them (e.g., noting Patel 'might not be the most targeted fit' for anxiety), and it ends with an actual lean/recommendation toward Chen or Torres rather than presenting all providers as equally valid options. This addresses the root cause partially \u2014 there is now some guidance applied to the biographical details rather than a flat dump. However, the fix is incomplete: the fixed response still presents all four providers with biographical details upfront before gathering any qualifying information (new vs. existing patient, location, availability), which means the agent is still leading with a data dump rather than using context to trigger the recommendation. The better approach would have been to ask the 2-3 qualifying questions first, then use the answers to selectively share relevant provider background. Instead, the fixed response asks the questions AND dumps the biographical details simultaneously, which reduces but does not resolve the core problem. The recommendation at the end ('I would likely lean toward Dr. Chen or Dr. Torres') is a genuine improvement and does directly address the 'ignoring useful background info' failure mode, but the 'unprompted dump' failure mode is still partially present.",
+      "remaining_concerns": "Provider biographical details are still presented upfront before qualifying questions are answered, meaning the agent is still partially dumping information unprompted rather than waiting for context to determine which details are relevant. The fix addresses the 'never uses the information' failure mode but only partially addresses the 'dumps it unprompted' failure mode."
+    },
+    {
+      "issue_id": "PE-11",
+      "scenario_description": "Patient canceling appointment due to sudden illness, triggering cold policy recitation without empathy",
+      "user_message": "Hi, I need to cancel my appointment for tomorrow morning... I've been up all night sick and I can barely get out of bed. I'm really sorry for the short notice, I just don't have a choice.",
+      "original_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nI am so sorry to hear you are not feeling well \u2014 please do not apologize, these things happen and we completely understand. Let me get that appointment canceled for you right away.\n\nI will just need to verify your information first. Could I get your first name please?",
+      "fixed_response": "Thank you for calling Greenfield Medical Group, this is Ava. How can I help you today?\n\nOh, I'm so sorry to hear you're not feeling well \u2014 please don't worry at all, these things happen. Let's get that taken care of for you right away.\n\nI'll just need to verify your identity first. Could I get your first name?",
+      "improvement_detected": false,
+      "improvement_score": 2,
+      "explanation": "Both responses are nearly identical in structure and empathy level. The original already contained empathy ('I am so sorry to hear you are not feeling well \u2014 please do not apologize, these things happen and we completely understand'). The fixed version makes only cosmetic changes: contractions ('I am' \u2192 'I'm', 'I will' \u2192 'I'll'), slight rewording ('please do not apologize' \u2192 'please don't worry at all'), and 'verify your information' \u2192 'verify your identity'. Neither response actually addresses the stated issue \u2014 the cold policy recitation about cancellation fees. In fact, neither response mentions any cancellation fee policy at all, making it impossible to evaluate whether the empathy-before-policy fix was actually applied. The scenario involves a cancellation fee warning being delivered coldly, but no fee warning appears in either response. The improvement described in the fix ('acknowledge the patient's situation with empathy before stating the policy') cannot be assessed because neither version states the policy.",
+      "remaining_concerns": "The core scenario \u2014 a patient being hit with a cold cancellation fee warning \u2014 is not demonstrated in either response. It's unclear if the fee policy was removed entirely or if this is just the opening exchange. If the fee policy discussion happens later and was fixed there, that change is not shown here. The difference between the two responses is purely cosmetic and does not demonstrate the described fix was implemented."
+    }
+  ],
+  "summary": {
+    "total_issues": 23,
+    "selected_count": 23,
+    "verified_count": 24,
+    "improved_count": 3,
+    "avg_score": 2.4
+  }
+}
