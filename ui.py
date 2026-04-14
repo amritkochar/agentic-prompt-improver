@@ -7,7 +7,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from models import FixProposal, Issue, JudgeVerdict
+from models import FixProposal, FixValidation, Issue, PrinciplesBrief, VerificationResult
 
 console = Console()
 
@@ -21,6 +21,14 @@ SEVERITY_COLORS = {
 DIMENSION_LABELS = {
     "workflow_adherence": "Workflow",
     "patient_experience": "Patient Exp",
+    "principles": "Principles",
+}
+
+METHOD_LABELS = {
+    "exact_anchor": "[green]exact[/green]",
+    "fuzzy_anchor": "[yellow]fuzzy[/yellow]",
+    "llm_fallback": "[yellow]llm fallback[/yellow]",
+    "failed": "[red]failed[/red]",
 }
 
 
@@ -47,6 +55,28 @@ def show_step(step: int, title: str):
 
 def show_progress(message: str):
     console.print(f"  [dim]{message}...[/dim]")
+
+
+def show_principles_summary(brief: PrinciplesBrief):
+    """Print a compact one-line summary of the principles brief plus the contract."""
+    ids = ", ".join(p.id for p in brief.active_principles)
+    signals = ", ".join(brief.domain_signals) if brief.domain_signals else "(none)"
+
+    console.print(
+        f"  [bold]Modality:[/bold] [cyan]{brief.modality}[/cyan]  |  "
+        f"[bold]Domain:[/bold] {signals}  |  "
+        f"[bold]{len(brief.active_principles)} principles active[/bold]"
+    )
+    if ids:
+        console.print(f"  [dim]{ids}[/dim]")
+    console.print(Panel(
+        brief.interaction_contract,
+        title="[bold]Interaction Contract[/bold]",
+        border_style="dim",
+    ))
+    if brief.structure_notes:
+        console.print(f"  [dim]Structure: {brief.structure_notes}[/dim]")
+    console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +160,26 @@ def get_user_selection(issues: list[Issue]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Fix progress
+# Fix validation
+# ---------------------------------------------------------------------------
+
+def show_fix_validation(validation: FixValidation):
+    method_label = METHOD_LABELS.get(validation.method, validation.method)
+
+    if validation.applied and validation.assertion_passed:
+        status = f"[green]applied[/green] ({method_label}) — assertion [green]PASSED[/green]"
+    elif validation.applied:
+        status = f"[yellow]applied[/yellow] ({method_label}) — assertion [red]FAILED[/red]"
+    else:
+        status = f"[red]not applied[/red] ({method_label})"
+
+    console.print(f"  [bold]{validation.issue_id}[/bold]: {status}")
+    if not validation.assertion_passed and validation.explanation:
+        console.print(f"    [dim]{validation.explanation[:120]}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Fix progress (legacy compat)
 # ---------------------------------------------------------------------------
 
 def show_fix_progress(issue_id: str, status: str):
@@ -145,14 +194,15 @@ def show_fix_progress(issue_id: str, status: str):
 def show_verification_header():
     console.print()
     console.print(Panel(
-        "[bold]Adversarial Verification[/bold]\n"
-        "Generating targeted test scenarios, simulating responses, judging improvement.",
+        "[bold]Behavioral Probe Verification[/bold]\n"
+        "Testing each fix with a mid-workflow probe — comparing tool calls, "
+        "conditions checked, and agent behavior between original and fixed prompts.",
         style="magenta",
     ))
     console.print()
 
 
-def show_verdict(verdict: JudgeVerdict):
+def show_verdict(verdict: VerificationResult):
     score = verdict.improvement_score
     if score >= 7:
         score_style = "bold green"
@@ -164,26 +214,29 @@ def show_verdict(verdict: JudgeVerdict):
         score_style = "bold red"
         score_label = "NO CHANGE"
 
-    # Scenario header
+    # Structural check status
+    struct = "[green]PASS[/green]" if verdict.structural_pass else "[red]FAIL[/red]"
+    behav = "[green]PASS[/green]" if verdict.behavioral_pass else "[red]FAIL[/red]"
+
+    # Header with both check results
     console.print(Panel(
-        f"[bold]Scenario:[/bold] {verdict.scenario_description}\n"
-        f"[bold]Caller:[/bold] \"{verdict.user_message}\"",
+        f"[bold]Structural:[/bold] {struct}  |  [bold]Behavioral:[/bold] {behav}",
         title=f"[bold]{verdict.issue_id}[/bold]",
         border_style="dim",
     ))
 
-    # Side-by-side responses (strip TRIGGERED_ISSUE line for display)
-    orig = verdict.original_response.split("TRIGGERED_ISSUE:")[0].strip()
-    fixed = verdict.fixed_response.split("TRIGGERED_ISSUE:")[0].strip()
+    # Side-by-side probe responses
+    orig = verdict.original_probe_response
+    fixed = verdict.fixed_probe_response
 
     orig_panel = Panel(
-        orig[:600] + ("..." if len(orig) > 600 else ""),
-        title="[red]Original[/red]",
+        orig[:800] + ("..." if len(orig) > 800 else ""),
+        title="[red]Original Behavior[/red]",
         border_style="red",
     )
     fixed_panel = Panel(
-        fixed[:600] + ("..." if len(fixed) > 600 else ""),
-        title="[green]Fixed[/green]",
+        fixed[:800] + ("..." if len(fixed) > 800 else ""),
+        title="[green]Fixed Behavior[/green]",
         border_style="green",
     )
     console.print(Columns([orig_panel, fixed_panel], equal=True, expand=True))
@@ -203,17 +256,23 @@ def show_verdict(verdict: JudgeVerdict):
 # ---------------------------------------------------------------------------
 
 def show_final_summary(
-    verdicts: list[JudgeVerdict],
+    verdicts: list[VerificationResult],
+    validations: list[FixValidation],
     output_dir: str,
     total_issues: int,
     selected_count: int,
 ):
-    if not verdicts:
+    if not verdicts and not validations:
         console.print(Panel("[yellow]No verification performed.[/yellow]"))
         return
 
-    improved = sum(1 for v in verdicts if v.improvement_detected)
-    avg_score = sum(v.improvement_score for v in verdicts) / len(verdicts)
+    applied_count = sum(1 for v in validations if v.applied)
+    validated_count = sum(1 for v in validations if v.applied and v.assertion_passed)
+    improved = sum(1 for v in verdicts if v.behavioral_pass) if verdicts else 0
+    avg_score = (
+        sum(v.improvement_score for v in verdicts) / len(verdicts)
+        if verdicts else 0
+    )
 
     table = Table(box=box.SIMPLE, show_header=False)
     table.add_column("Metric", style="bold")
@@ -221,9 +280,20 @@ def show_final_summary(
 
     table.add_row("Issues detected", str(total_issues))
     table.add_row("Issues selected for fix", str(selected_count))
-    color = "green" if improved == len(verdicts) else "yellow"
-    table.add_row("Verified improved", f"[{color}]{improved}/{len(verdicts)}[/]")
-    table.add_row("Average improvement score", f"[bold]{avg_score:.1f}/10[/bold]")
+    table.add_row("Fixes applied", f"{applied_count}/{selected_count}")
+    table.add_row("Fixes validated (assertion passed)", f"{validated_count}/{applied_count}")
+
+    if verdicts:
+        color = "green" if improved == len(verdicts) else "yellow"
+        table.add_row(
+            "Behavioral probe improved",
+            f"[{color}]{improved}/{len(verdicts)}[/]",
+        )
+        table.add_row(
+            "Average improvement score",
+            f"[bold]{avg_score:.1f}/10[/bold]",
+        )
+
     table.add_row("Report", f"{output_dir}/report.json")
     table.add_row("Fixed prompt", f"{output_dir}/fixed_prompt.json")
 
@@ -237,3 +307,95 @@ def show_final_summary(
 
 def show_error(message: str):
     console.print(f"[bold red]Error:[/bold red] {message}")
+
+
+# ---------------------------------------------------------------------------
+# LLM token stats
+# ---------------------------------------------------------------------------
+
+def _fmt_num(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _sum_stats(stats: dict) -> dict:
+    total = {"calls": 0, "input": 0, "cache_read": 0, "cache_create": 0, "output": 0}
+    for row in stats.values():
+        for k in total:
+            total[k] += row.get(k, 0)
+    return total
+
+
+def show_pass_stats(delta: dict, label: str) -> None:
+    """One-line summary of LLM usage incurred during a single pass."""
+    if not delta:
+        return
+    total = _sum_stats(delta)
+    cached_pct = (
+        100 * total["cache_read"] / (total["input"] + total["cache_read"] + total["cache_create"])
+        if (total["input"] + total["cache_read"] + total["cache_create"]) > 0
+        else 0
+    )
+    console.print(
+        f"  [dim][{label} LLM][/dim] "
+        f"calls={total['calls']}  "
+        f"in={_fmt_num(total['input'])}  "
+        f"cache_read={_fmt_num(total['cache_read'])}  "
+        f"cache_create={_fmt_num(total['cache_create'])}  "
+        f"out={_fmt_num(total['output'])}  "
+        f"[dim](cache_read={cached_pct:.0f}% of input)[/dim]"
+    )
+
+
+def show_llm_stats_summary(stats: dict) -> None:
+    """Final per-model + total breakdown of LLM usage for the whole run."""
+    if not stats:
+        return
+
+    table = Table(
+        title="[bold]LLM Token Usage[/bold]",
+        box=box.SIMPLE,
+        title_style="bold white",
+    )
+    table.add_column("Model", style="cyan")
+    table.add_column("Calls", justify="right")
+    table.add_column("Input", justify="right")
+    table.add_column("Cache Read", justify="right", style="green")
+    table.add_column("Cache Create", justify="right", style="yellow")
+    table.add_column("Output", justify="right")
+
+    for model, row in sorted(stats.items()):
+        table.add_row(
+            model,
+            str(row["calls"]),
+            _fmt_num(row["input"]),
+            _fmt_num(row["cache_read"]),
+            _fmt_num(row["cache_create"]),
+            _fmt_num(row["output"]),
+        )
+
+    total = _sum_stats(stats)
+    table.add_section()
+    table.add_row(
+        "[bold]TOTAL[/bold]",
+        f"[bold]{total['calls']}[/bold]",
+        f"[bold]{_fmt_num(total['input'])}[/bold]",
+        f"[bold]{_fmt_num(total['cache_read'])}[/bold]",
+        f"[bold]{_fmt_num(total['cache_create'])}[/bold]",
+        f"[bold]{_fmt_num(total['output'])}[/bold]",
+    )
+
+    console.print()
+    console.print(table)
+
+    # Cache-hit interpretation note
+    total_in = total["input"] + total["cache_read"] + total["cache_create"]
+    if total_in > 0:
+        cached_pct = 100 * total["cache_read"] / total_in
+        console.print(
+            f"  [dim]{cached_pct:.1f}% of input tokens served from cache "
+            f"(cache reads cost ~10% of full input rate).[/dim]"
+        )
