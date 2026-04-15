@@ -2,12 +2,14 @@
 
 Agentic CLI that analyzes a conversational agent system prompt, detects real quality issues across caller experience and workflow adherence, proposes targeted fixes, and verifies each fix actually changes agent behavior via adversarial probe + independent LLM judge.
 
+> For a full system diagram and pass-by-pass walkthrough see [`docs/overview.md`](docs/overview.md).
+
 ## Run
 
 ```bash
 pip3 install -r requirements.txt
 cp .env.example .env          # then edit .env and set your ANTHROPIC_API_KEY
-python3 main.py docs/assignment-agent-prompt.json
+python3 main.py docs/prompts/assignment-agent-prompt.json
 ```
 
 ### Options
@@ -25,6 +27,32 @@ python3 main.py PROMPT.json \
     [--output-dir DIR]        # default: output
     [-v]                      # verbose logging
 ```
+
+## Testing
+
+```bash
+# Run all 91 unit tests
+python3 -m pytest tests/ -v
+
+# Run by module
+python3 -m pytest tests/test_fix_engine.py -v      # fuzzy matching, anchor resolution, fix application
+python3 -m pytest tests/test_memory.py -v          # KG load/write round-trip, lesson selection
+python3 -m pytest tests/test_loader.py -v          # prompt loading, key extraction, agent name
+python3 -m pytest tests/test_schema_registry.py -v # tool-parameter constraint extraction
+
+# Run a specific class or keyword
+python3 -m pytest tests/test_fix_engine.py::TestDisambiguateDuplicateAnchor -v
+python3 -m pytest tests/ -k "fuzzy" -v
+```
+
+Tests are pure unit tests — no LLM calls, no API key required, run in ~0.3s.
+
+| File | Tests | What it covers |
+|------|-------|----------------|
+| `test_fix_engine.py` | 28 | `_fuzzy_find`, `_all_occurrences`, `_disambiguate_duplicate_anchor`, `_find_block_boundaries`, `_apply_single_fix`, `extract_key_phrases` |
+| `test_memory.py` | 20 | `load_kg`, `write_kg` round-trip, cap enforcement, `select_relevant_lessons` scoring, `format_lessons_for_prompt` |
+| `test_loader.py` | 15 | JSON dict/list/text loading, `extract_prompt_text` fallback logic, `get_agent_name`, `get_prompt_key` |
+| `test_schema_registry.py` | 28 | `_iter_tools`, `_tool_name`, `_tool_parameters`, `build_registry` (required params, enums, formats, truncation), `build_registry_from_json_text` |
 
 ## Outputs (in `output/`)
 
@@ -60,7 +88,7 @@ With `--iterate N`, failed fixes go back through passes 2-4 with structured verd
 - **Parallel verification.** Pass 4 and Pass 5 run probe traces across issues concurrently via `asyncio.gather` / `as_completed`; within a single verification, the original-prompt and fixed-prompt probes also run in parallel. Rate-limited via a semaphore (`--concurrency`, default 5). Zero cost change vs sequential — same calls, same tokens.
 - **Domain-agnostic prompts, healthcare-tuned library.** Detection/reflection/analysis prompts are written in caller-neutral language; the canonical principles library is healthcare-flavored but fallbacks only add healthcare-specific principles when healthcare signals are actually present. A warning panel fires when a non-healthcare domain is inferred.
 - **Prompt caching.** The canonical principles text is large and static, so it's wrapped as a single ephemeral cache block shared across passes. Typical cache-read ratios are 75-95%.
-- **Minimal surface.** Small package (`agents/` split by pass, plus `pipeline.py`, `reporting.py`, `memory.py`, `schema_registry.py`, `loader.py`, `ui.py`). No agent framework, no DAG runner, no vector store.
+- **Minimal surface.** Two packages: `agents/` (one file per pass, `prompts/` subpackage with per-pass templates) and `core/` (loader, models, memory, schema registry, pipeline, reporting, principles, UI). No agent framework, no DAG runner, no vector store.
 
 ## Cost & Performance
 
@@ -86,10 +114,9 @@ Prioritized, with rough effort. (Parallel verification and cross-run memory — 
 2. **Multi-location fix proposals (≈4h).** Today `FixProposal` is one anchor → one edit. Many real bugs (a date format mentioned in policy + tool section + example) need coordinated edits. Extend the schema to `edits: list[Edit]` and teach analysis to recognize multi-site issues.
 3. **Richer multi-turn probe (≈3h).** Today's follow-up generator produces a single next message; a proper adversarial caller would adapt persona (escalating / disengaged / confused) and include a stop condition.
 4. **Cost + token budgets (≈1h).** `--max-cost` flag that aborts gracefully before the next paid call once exceeded.
-5. **Unit test suite (≈4h).** Anchor disambiguation, fuzzy matching, schema registry extraction, loader edge cases, KG round-trip, async probe flow — none currently have automated coverage.
-6. **Non-healthcare regression prompts (≈2h).** Commit 2-3 synthetic prompts (fintech fraud check, SaaS cancel flow) and run them through CI to validate the domain-agnostic path stays domain-agnostic.
-7. **LLM-as-judge calibration (≈half-day).** Seed a small annotated set of (original, fixed, ground-truth-score) triples and measure judge correlation; adjust rubric weight where it drifts.
-8. **Post-apply seam smoother (≈2h).** Optional LLM pass after all fixes land that touches only grammar/tone at edit boundaries — no semantic changes.
+5. **Non-healthcare regression prompts (≈2h).** Commit 2-3 synthetic prompts (fintech fraud check, SaaS cancel flow) and run them through CI to validate the domain-agnostic path stays domain-agnostic.
+6. **LLM-as-judge calibration (≈half-day).** Seed a small annotated set of (original, fixed, ground-truth-score) triples and measure judge correlation; adjust rubric weight where it drifts.
+7. **Post-apply seam smoother (≈2h).** Optional LLM pass after all fixes land that touches only grammar/tone at edit boundaries — no semantic changes.
 
 ## Agentic Patterns Used
 
