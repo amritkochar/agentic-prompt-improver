@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 SystemPrompt = Union[str, list[dict]]
 
-HAIKU_MODEL = "claude-haiku-4-5"
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+SONNET_MODEL = "claude-sonnet-4-6"
 
 
 def _cached_block(text: str) -> dict:
@@ -53,7 +54,7 @@ DEFAULT_CONCURRENCY = 5
 
 
 class LLM:
-    def __init__(self, model: str = HAIKU_MODEL):
+    def __init__(self, model: str = SONNET_MODEL):
         self.client = anthropic.Anthropic()
         self._aclient: Optional[anthropic.AsyncAnthropic] = None
         self.model = model
