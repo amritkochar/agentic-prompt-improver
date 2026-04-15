@@ -37,17 +37,22 @@ Your brief must contain:
 3. domain_signals — 2-6 short tags adding nuance ("scheduling",
    "compliance", "phi", "fraud_check", "subscription_mgmt", etc.).
 
-4. active_principles — the MOST load-bearing subset of canonical principles
-   for this prompt. MAXIMUM 12 entries. BE SELECTIVE: choose only principles
-   that THIS specific prompt visibly violates or is at clear risk of
-   violating. Do NOT list every principle that is theoretically applicable —
-   if you find yourself including more than 12, drop the least load-bearing
-   until you are at or under the cap.
+4. active_principles — principles this specific prompt VISIBLY VIOLATES or
+   is at clear, concrete risk of violating given its domain and tool set.
+   MAXIMUM 12. MINIMUM is whatever the evidence supports — 3 sharp entries
+   beats 12 speculative ones. "Load-bearing" means: if this principle were
+   violated, a production call would measurably break or degrade. Do NOT
+   include a principle just because it is theoretically relevant; skip any
+   that the prompt clearly already satisfies.
 
    For each entry:
    - id: the principle ID (e.g. "STYLE-01", "TOOL-04", "CONTENT-01")
-   - reason: one short sentence naming WHY this principle is load-bearing
-     for THIS specific input (reference concrete features of the prompt)
+   - reason: one short sentence naming the CONCRETE feature of the prompt
+     that makes this principle load-bearing. Quote a fragment of the prompt
+     or name a specific tool/section. Bad: "The prompt is a voice agent so
+     STYLE-01 applies." Good: "Instruction 'Please confirm each of the
+     following before proceeding: ...' lists 4 items in one voice reply —
+     STYLE-01 violation risk."
 
 5. interaction_contract — a single short paragraph (2–4 sentences) that
    summarises the expected interaction style for this agent given the
@@ -120,12 +125,21 @@ subtle. If the registry is missing, fall back to reading the tool_definitions
 JSON directly.
 
 For each issue:
-- Quote the EXACT text from the prompt as evidence (copy-paste verbatim)
+- Quote the EXACT text from the prompt as evidence (copy-paste verbatim). If you \
+cannot quote verbatim text that proves the issue, the issue is speculative — drop it.
 - Rate severity: critical (breaks behavior silently), high (user-facing problem), \
-medium (quality degradation), low (minor improvement)
-- Assign an ID: WA-XX for workflow adherence, PE-XX for caller experience, \
-PRIN-<ID> for principle violations
-- Only report genuine issues that would affect production calls, not stylistic preferences
+medium (quality degradation), low (minor improvement).
+- Assign an ID: WA-01, WA-02, ... for workflow adherence; PE-01, PE-02, ... for \
+caller experience; PRIN-<PRINCIPLE-ID> for principle violations. Number from 01 \
+within each dimension.
+- REPRODUCIBILITY TEST: before raising an issue, imagine a concrete mid-workflow \
+scenario (≤3 sentences) where a capable agent following this prompt would produce \
+visibly wrong behavior because of the issue. If you cannot construct such a scenario, \
+the issue is not testable and should be dropped — our downstream verification \
+requires it.
+- NO PADDING: fewer sharp issues beat many soft ones. Do not raise stylistic \
+preferences, hypothetical edge cases, or issues the prompt already mitigates \
+elsewhere. If in doubt, leave it out.
 
 Return JSON matching this schema:
 {
@@ -149,6 +163,9 @@ prompt. Your job is to critique this list rigorously. The agent may be in
 any domain — use the <principles_brief> domain/modality to calibrate what
 counts as a real issue versus a stylistic preference.
 
+A shorter, sharper list is better than a longer speculative one. Be willing \
+to cut the list in half if that's what the evidence supports.
+
 REMOVE any issues that are:
 - False positives (the prompt actually handles it correctly elsewhere — check carefully)
 - Stylistic preferences rather than real quality problems
@@ -156,6 +173,12 @@ REMOVE any issues that are:
 - Too vague or speculative to be actionable
 - Principles issues raised against a principle that the prompt does NOT actually violate
 - Domain-inapplicable (e.g. flagging a missing "eligibility check" on a non-scheduling agent)
+- Not reproducible as a concrete mid-workflow scenario (downstream verification \
+cannot probe abstractions)
+
+MERGE issues that are different surface symptoms of the same root cause into a \
+single sharper issue. Prefer one issue with three pieces of evidence over three \
+issues with one each.
 
 ADD any obvious high-severity issues that were missed, especially:
 - Tool parameter format/enum mismatches (cross-check against <tool_schema_registry>)
@@ -186,10 +209,14 @@ For each issue, produce a fix with these components:
 "workflow_adherence", "patient_experience", or "principles". This routes downstream \
 verification (principles-issues skip the behavioral probe).
 
-2. ANCHOR TEXT (anchor_text): Find a short (20-40 character), UNIQUE substring in the \
-prompt that is AT or NEAR where the fix should go. This is used to locate the edit site. \
-CRITICAL: Verify the anchor appears EXACTLY ONCE in the prompt. If a substring appears \
-multiple times, choose a longer or more specific one.
+2. ANCHOR TEXT (anchor_text): A short (20-40 character), UNIQUE substring in the \
+prompt copied VERBATIM, AT or NEAR where the fix should go. This is used to locate \
+the edit site deterministically.
+   CRITICAL: The anchor must appear EXACTLY ONCE in the prompt. Before committing, \
+scan the prompt for every occurrence of your candidate string. If it appears \
+multiple times, extend it until it is unique, or pick a different nearby phrase. \
+Our fix engine REFUSES to guess when anchors are ambiguous — a non-unique anchor \
+fails the fix cleanly, no second chance.
 
 3. ANCHOR CONTEXT (anchor_context): Which section of the prompt this is in (for readability).
 
@@ -197,13 +224,15 @@ multiple times, choose a longer or more specific one.
    - "replace": Replace the paragraph/sentence containing the anchor with new_content.
    - "insert_after": Insert new_content as a new paragraph AFTER the paragraph containing the anchor.
 
-5. NEW CONTENT (new_content): The replacement text or new text to add. Keep it minimal \
-and consistent with the prompt's existing style. For "replace" fixes, include the FULL \
-replacement for the paragraph/block being changed. For "insert_after" fixes, include \
-only the new text to add. Your fix must respect the active principles listed in the \
-<principles_brief> block — e.g. for a voice modality, keep added text brief and \
-transactional; for SMS content, include the 5-Ws; for multi-step side effects, specify \
-rollback.
+5. NEW CONTENT (new_content): The replacement text or the new text to add. Minimal, \
+surgical, and stylistically INVISIBLE — match the prompt's existing tense, register, \
+bullet-vs-prose shape, and capitalization conventions. For "replace" fixes, include \
+the FULL replacement for the paragraph/block being changed. For "insert_after" \
+fixes, include only the new text to add. Do NOT rewrite more than necessary; do \
+NOT restructure adjacent paragraphs. Your fix must respect the active principles \
+listed in the <principles_brief> block — e.g. for voice modality, keep added text \
+brief and transactional; for SMS content, include the 5-Ws; for multi-step side \
+effects, specify rollback.
 
 6. ASSERTION (assertion): A plain English statement that can be verified by reading the \
 fixed prompt. This is used to confirm the fix was applied correctly.
@@ -220,25 +249,54 @@ fix changes agent behavior at the EXACT decision point where the bug lives.
    - Include all necessary prior context as given facts
    - Ask the agent to describe what it does next, including specific tool call parameters
 
-   ADVERSARIAL FRAMING (CRITICAL): A capable agent will often do the right thing by \
-reading tool schemas or applying general common sense — even when the prompt is \
-silent or wrong on the rule. If your probe does not make the WRONG behavior \
-tempting, both the original and fixed agent will produce the same correct output \
-and the judge will rule the comparison "inconclusive" (a wasted verification). \
-Before committing the probe, ask yourself: "If the agent ignored the fixed prompt \
-text entirely, could it still arrive at the correct answer from the tool schema or \
-obvious context?" If yes, the probe is too easy — add a distractor that baits the \
-original prompt's failure mode:
-     - For format bugs: supply the data in a DIFFERENT format than required (e.g. \
-"current_time returned 2026-04-14; the patient said June 5th 2026" — invites \
-copying YYYY-MM-DD when the tool wants DD-MM-YYYY).
-     - For ordering bugs: make the wrong-order path look equally natural (e.g. \
+   ADVERSARIAL FRAMING (CRITICAL — this is the #1 reason verifications come back \
+"inconclusive"): A capable simulator model will often do the right thing by reading \
+tool schemas or applying general common sense, even when the prompt is silent or \
+wrong on the rule. If your probe does not make the WRONG behavior the LOCALLY \
+TEMPTING answer, both the original and fixed agent will produce the same correct \
+output and the judge will rule "inconclusive" (a wasted verification).
+
+   PROBE DESIGN CHECKLIST — every probe must satisfy ALL of these:
+   (a) **Adversarial lure**: the scenario contains at least one detail that makes the \
+BUGGY path look locally correct. Without the lure, the original prompt's bug will not \
+surface. State the lure explicitly as part of the scenario facts.
+   (b) **Mid-workflow positioning**: identity verification, greeting, and any \
+gate-keeping steps are already complete. The agent is AT the decision point where \
+the bug lives.
+   (c) **Schema invisibility**: the correct answer must NOT be deducible from the \
+tool schema alone. If a well-designed tool schema (param names, enums, required \
+fields) would guide any reasonable agent to the correct answer regardless of the \
+prompt, the probe cannot distinguish original from fixed. Either (i) change the \
+lure so the schema's default answer is WRONG for this scenario, or (ii) pick a \
+different issue to probe.
+   (d) **Single decision point**: ask about ONE next action, not a 5-step plan. \
+Multi-step answers dilute the signal and let the judge see "both prompts eventually \
+do the right thing" even when the first step differs.
+
+   Before committing the probe, answer in your head: "If a smart simulator \
+ignored the prompt text entirely and just looked at the scenario + tool schema, \
+would it produce the BUGGY answer?" If no, the probe is too easy — strengthen \
+the lure or pick a different issue.
+
+   Concrete lure patterns by bug class:
+     - **Format bugs**: supply the data in a DIFFERENT format than the tool \
+requires (e.g. "current_time returned 2026-04-14; the patient said June 5th 2026" \
+— invites copying YYYY-MM-DD when the tool wants DD-MM-YYYY).
+     - **Ordering bugs**: make the wrong-order path look equally natural (e.g. \
 "the patient said yes to the new slot" — invites immediate cancel-then-book).
-     - For missing-parameter bugs: describe the scenario without naming the \
+     - **Missing-parameter bugs**: describe the scenario without naming the \
 parameter, so the original prompt's omission is the only thing stopping the agent \
-from forgetting it.
-     - For workflow-sequence bugs: end the scenario at the precise step BEFORE the \
-one that is usually skipped, not after it.
+from forgetting it. If the tool schema marks the param `required`, the schema \
+alone will save both prompts — pick a different bug or a param the schema \
+treats as optional.
+     - **Workflow-sequence bugs**: end the scenario at the precise step BEFORE \
+the one that is usually skipped, not after it.
+     - **Empathy/tone bugs**: put the caller in an emotionally loaded moment and \
+ask for the agent's NEXT utterance only. A multi-step plan dilutes the speech \
+signal.
+     - **Guardrail bugs (off-policy requests)**: make the off-policy ask sound \
+routine and embed it in a legitimate request, so refusing is the less \
+"cooperative-seeming" path.
 
    BAD probe: "I'd like to book an appointment." (too early — identical behavior)
    BAD probe: "What format do you pass for start_date?" (schema tells the agent \
@@ -294,59 +352,87 @@ Return JSON matching this schema:
 # ── Pass 3: Fix Engine (LLM fallback) ────────────────────────────────────────
 
 LLM_FIX_PROMPT = """\
-You are a precise text editor. Apply the described fix to the prompt section below.
+You are a precise text editor applying a single surgical fix to a section of a \
+conversational-agent system prompt.
 
 Fix description: {fix_description}
 New content to incorporate: {new_content}
 
-Return ONLY the modified section text. Do not add explanations or markup. \
-Keep all surrounding text unchanged — only modify what the fix requires."""
+RULES:
+- Return ONLY the modified section text. No explanations, no preamble, no trailing \
+commentary, no markdown code fences (```), no XML tags.
+- Keep ALL surrounding text byte-for-byte unchanged. Change only what the fix \
+strictly requires. Do not reword neighboring sentences, reflow paragraphs, or \
+normalize whitespace.
+- Preserve the original tense, register, bullet-vs-prose shape, and capitalization.
+- If the fix cannot be applied to this section without rewriting more than one \
+paragraph of unrelated text, return the section EXACTLY as given, unchanged. A \
+visible fix-failed is safer than silent collateral damage."""
 
 
 # ── Pass 3b: Assertion check ─────────────────────────────────────────────────
 
 ASSERTION_CHECK_PROMPT = """\
-You are checking whether a specific assertion about a voice agent prompt is satisfied.
+You are a strict verifier checking whether a specific assertion about a \
+conversational-agent prompt is satisfied by the prompt text.
 
 Read the prompt section below and determine whether the assertion is true.
 
 ASSERTION: {assertion}
 
-Be strict: the assertion must be clearly and specifically satisfied by text in the \
-prompt, not merely implied or partially addressed.
+Rules:
+- Be strict. The assertion must be clearly and specifically satisfied by VERBATIM \
+text in the prompt — not merely implied, not partially addressed, not something a \
+reader could reasonably infer.
+- Partial satisfaction is NOT a pass. If the assertion has two clauses and only \
+one is supported by the text, return passed=false and name which clause is \
+missing.
+- In `explanation`, quote the exact text that satisfies the assertion (pass) or \
+state "not found in section — closest match: '<nearest phrase>'" (fail).
 
 Return JSON:
 {{
-  "passed": true,
-  "explanation": "Quote the specific text that satisfies the assertion"
+  "passed": true_or_false,
+  "explanation": "Verbatim quote that satisfies the assertion, or 'not found' reason"
 }}"""
 
 
 # ── Pass 4: Behavioral Probe + Judge ─────────────────────────────────────────
 
 PROBE_PROMPT = """\
-You are an agent following the system prompt below. You are in the MIDDLE of an \
-ongoing interaction — the greeting, identity verification, and earlier workflow \
-steps have already been completed. Use the modality stated in the \
-<principles_brief> (if present) to shape your reply style: for voice, keep SPEECH \
-brief and transactional; for chat, short structured replies are fine; for SMS, \
-ultra-terse with the 5-Ws where applicable.
+You are role-playing a deployed agent that follows the system prompt below \
+LITERALLY. You are in the MIDDLE of an ongoing interaction — greeting, identity \
+verification, and earlier workflow steps have already been completed.
 
-The scenario below describes what has happened so far and where you are in the workflow.
+CRITICAL — PROMPT FIDELITY: Your job is to do exactly what THIS system prompt \
+tells you to do, including any mistakes, omissions, or ambiguities it contains. \
+Do NOT silently apply general common sense to patch over bugs you notice. Do NOT \
+reformat parameters based on what looks reasonable. Do NOT add safety checks the \
+prompt doesn't mention. If the prompt is silent on something, follow the most \
+natural reading of what it does say — even when that produces a clearly wrong \
+result. We are measuring the prompt, not your intelligence.
 
-Given this state, describe what you do next. Be SPECIFIC about:
+Use the modality stated in the <principles_brief> (if present) to shape your \
+reply style: for voice, keep SPEECH brief and transactional; for chat, short \
+structured replies are fine; for SMS, ultra-terse with the 5-Ws where applicable.
 
-SPEECH: [Exactly what you say to the caller — full response, not a summary]
-TOOL_CALLS: [List each tool call you would make, with exact function name and ALL \
-parameters as JSON. If no tool call is needed, write "none".]
-CONDITIONS_CHECKED: [List every condition, rule, or constraint you checked before \
-deciding on your action. Include dates compared, limits verified, provider restrictions \
-checked, etc. If none, write "none".]
+The scenario below describes what has happened so far and the exact decision \
+point you are at.
 
-IMPORTANT: You MUST describe actual tool calls with specific parameter values. Do NOT \
-skip tool calls or say "I would call the tool" — list the exact parameters you would pass.
-If the system prompt instructs you to set a specific parameter (like late_cancel, \
-cancelled_by, message_type, etc.), you MUST include it."""
+Given this state, describe the ONE next action you take. Be SPECIFIC about:
+
+SPEECH: [Exactly what you say to the caller — full verbatim utterance, not a \
+summary. If you would stay silent, write "none".]
+TOOL_CALLS: [List each tool call you would make at this step, with exact function \
+name and ALL parameters as JSON (values in the format the prompt tells you to use, \
+not the format that seems "more standard"). If no tool call is needed, write "none".]
+CONDITIONS_CHECKED: [List every condition, rule, or constraint you actually \
+consulted in the prompt before deciding. Include dates compared, limits verified, \
+provider restrictions, enum/format requirements, etc. If none, write "none". Do \
+NOT list conditions the prompt never mentioned.]
+
+Do NOT include meta-commentary, apologies, or "I noticed the prompt says X but it \
+should probably say Y" — just the three sections above."""
 
 JUDGE_PROMPT = """\
 You are an objective, skeptical evaluator comparing two voice agent behavioral \
@@ -379,18 +465,32 @@ inappropriately. Score 1-3.
 
 Partial improvements — fix addresses part of the issue but misses another part, or \
 changes ordering but leaves a sub-rule violated — go under "unchanged" with score \
-4-6. Do NOT call partial wins "improved".
+4-6. Do NOT call partial wins "improved". If you find yourself writing "the fix \
+improves X but still misses Y" → verdict is "unchanged", score 4-6.
 
 FOCUS ON CONCRETE DIFFERENCES between original and fixed:
-- TOOL_CALLS parameters — did the right params get added/changed/removed?
-- CONDITIONS_CHECKED — did the agent actually check something it previously skipped, \
-or was the new entry just restated intent?
-- Operation ordering — did the sequence of tool calls change as expected?
-- SPEECH — for caller-experience issues, did tone / empathy / escalation path change?
+- TOOL_CALLS parameters — did the right params get added/changed/removed with the \
+right values? (e.g. `late_cancel: true` vs missing; `start_date: "2026-06-05"` vs \
+`"05-06-2026"`)
+- CONDITIONS_CHECKED — did the agent actually consult something it previously \
+skipped, or was the new entry just restated intent without affecting the action?
+- Operation ordering — did the sequence of tool calls change as the issue required?
+- SPEECH — for caller-experience issues, did tone / empathy / escalation path \
+change in SUBSTANCE, not just word choice?
+
+IGNORE differences that are pure surface style: synonym choices, sentence \
+ordering within the same meaning, verbosity variation, politeness phrasing that \
+doesn't change the routing or the information conveyed. A fix that only changes \
+how things are phrased without changing what the agent DOES is "unchanged".
+
+NONSENSE / TRUNCATION: if either behavior is incomplete, garbled, or clearly \
+failed to follow the PROBE format (missing SPEECH/TOOL_CALLS/CONDITIONS_CHECKED), \
+verdict is "inconclusive" and `remaining_concerns` must call out the truncation.
 
 Be skeptical and precise. If the original already produced the correct output, \
-choose "inconclusive" — do not reward the fix for matching behavior that was already \
-right.
+choose "inconclusive" — do not reward the fix for matching behavior that was \
+already right. The verdict measures whether the FIX moved the agent, not whether \
+the agent's final answer is correct.
 
 Return JSON:
 {
@@ -401,18 +501,27 @@ Return JSON:
 }"""
 
 FOLLOWUP_GENERATOR_PROMPT = """\
-You are simulating a caller probing an agent for a known quality issue. You
-have already sent one message and received one response. Write the caller's
-NEXT message — a short, natural, on-topic follow-up that pressures the same
-decision point the original probe was targeting.
+You are simulating a caller who is probing an agent for a specific, named \
+quality issue. You have already sent one message and received one response. \
+Write the caller's NEXT message — a short, natural, on-topic follow-up that \
+keeps the pressure on the SAME decision point the original probe was targeting.
 
-The follow-up should:
-- Stay in character as the caller
-- React to something concrete in the agent's reply (disagreement, clarification, new detail)
-- Continue to exercise the issue being tested — do not drift to unrelated topics
-- Be 1-3 sentences max
+The follow-up must:
+- Stay in character as the caller. If the caller was frustrated, stay frustrated; \
+if they were in a hurry, keep that urgency.
+- React to something CONCRETE the agent just said (agree, disagree, add a \
+detail, ask a clarifying question).
+- Keep exercising the exact failure mode being tested. If the issue is about \
+date format, the follow-up must still involve date handling. Do NOT drift to \
+unrelated parts of the workflow (don't start asking about insurance when the \
+probe was about scheduling).
+- Introduce a NEW adversarial angle on the same bug when possible — e.g. the \
+agent gave a correct-looking answer; the follow-up adds a wrinkle that re-opens \
+the bug (a second date, a corrected name, a conflicting detail).
+- Be 1-3 sentences. No stage directions, no "the caller says", no quotation \
+marks — just the utterance itself.
 
-Return ONLY the caller's next message, no preamble."""
+Return ONLY the caller's next message."""
 
 
 # ── Pass 6: Knowledge-graph consolidation ────────────────────────────────────
@@ -449,6 +558,13 @@ Be concrete. Lessons should name the FIX STRATEGY or OBSERVATION, not just \
 the issue. Bad: "date format bugs happen". Good: "Fixing date-format bugs via \
 insert_after near the tool-call paragraph beats replace on the whole tool \
 section (3/3 runs). Confidence: medium".
+
+CONSULTABILITY TEST: before writing a lesson or triple, ask: "Would a future \
+analyze-pass prompt consult this to make a better fix proposal?" If the answer \
+is no — it's a one-off observation, a run metric, or a trivia point — skip it. \
+The KG only gets useful when every entry is actionable. Single-run \
+(support=1) lessons must describe a clearly reusable pattern, not a one-off \
+coincidence.
 
 Return JSON:
 {
