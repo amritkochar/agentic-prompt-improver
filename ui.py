@@ -57,6 +57,9 @@ def show_progress(message: str):
     console.print(f"  [dim]{message}...[/dim]")
 
 
+HEALTHCARE_DOMAIN_TAGS = {"healthcare", "clinical", "phi"}
+
+
 def show_principles_summary(brief: PrinciplesBrief):
     """Print a compact one-line summary of the principles brief plus the contract."""
     ids = ", ".join(p.id for p in brief.active_principles)
@@ -64,7 +67,8 @@ def show_principles_summary(brief: PrinciplesBrief):
 
     console.print(
         f"  [bold]Modality:[/bold] [cyan]{brief.modality}[/cyan]  |  "
-        f"[bold]Domain:[/bold] {signals}  |  "
+        f"[bold]Domain:[/bold] [cyan]{brief.domain}[/cyan]  |  "
+        f"[bold]Signals:[/bold] {signals}  |  "
         f"[bold]{len(brief.active_principles)} principles active[/bold]"
     )
     if ids:
@@ -76,6 +80,26 @@ def show_principles_summary(brief: PrinciplesBrief):
     ))
     if brief.structure_notes:
         console.print(f"  [dim]Structure: {brief.structure_notes}[/dim]")
+
+    # Domain gate: this tool's canonical principles library was tuned on
+    # healthcare voice agents. Warn when the inferred domain is something
+    # else so the user knows detection rules may need manual calibration.
+    inferred = (brief.domain or "").lower()
+    signal_tags = {s.lower() for s in brief.domain_signals}
+    is_healthcare = (
+        inferred in HEALTHCARE_DOMAIN_TAGS
+        or bool(signal_tags & HEALTHCARE_DOMAIN_TAGS)
+    )
+    if not is_healthcare and inferred != "unknown":
+        console.print(Panel(
+            f"Inferred domain is [bold]{brief.domain}[/bold], not healthcare. "
+            "The canonical principles library is healthcare-tuned; general "
+            "quality checks still apply, but domain-specific rules (eligibility, "
+            "PHI, 5-Ws notifications) will not fire. Verify detection results "
+            "manually before acting on them.",
+            title="[yellow]Non-healthcare domain detected[/yellow]",
+            border_style="yellow",
+        ))
     console.print()
 
 
@@ -174,8 +198,21 @@ def show_fix_validation(validation: FixValidation):
         status = f"[red]not applied[/red] ({method_label})"
 
     console.print(f"  [bold]{validation.issue_id}[/bold]: {status}")
+
+    # Approximate matches deserve explicit visibility — the user should know
+    # when a fix landed on a block that was only a close resemblance.
+    if validation.method == "fuzzy_anchor" and validation.match_confidence is not None:
+        console.print(
+            f"    [yellow]⚠ fuzzy anchor match at "
+            f"{validation.match_confidence:.0%} similarity — verify manually[/yellow]"
+        )
+    elif validation.method == "llm_fallback":
+        console.print(
+            "    [yellow]⚠ fix applied via LLM fallback on a local section — verify manually[/yellow]"
+        )
+
     if not validation.assertion_passed and validation.explanation:
-        console.print(f"    [dim]{validation.explanation[:120]}[/dim]")
+        console.print(f"    [dim]{validation.explanation[:160]}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -204,15 +241,16 @@ def show_verification_header():
 
 def show_verdict(verdict: VerificationResult):
     score = verdict.improvement_score
-    if score >= 7:
-        score_style = "bold green"
-        score_label = "IMPROVED"
-    elif score >= 4:
-        score_style = "bold yellow"
-        score_label = "PARTIAL"
-    else:
-        score_style = "bold red"
-        score_label = "NO CHANGE"
+    category = getattr(verdict, "verdict_category", "unchanged")
+    # Label + color driven by the judge's 4-way category so inconclusive
+    # (probe didn't trigger the bug) renders distinctly from unchanged.
+    category_styles = {
+        "improved": ("bold green", "IMPROVED"),
+        "inconclusive": ("bold blue", "INCONCLUSIVE"),
+        "unchanged": ("bold yellow", "UNCHANGED"),
+        "regressed": ("bold red", "REGRESSED"),
+    }
+    score_style, score_label = category_styles.get(category, ("bold yellow", category.upper()))
 
     # Structural check status
     struct = "[green]PASS[/green]" if verdict.structural_pass else "[red]FAIL[/red]"
@@ -268,10 +306,27 @@ def show_final_summary(
 
     applied_count = sum(1 for v in validations if v.applied)
     validated_count = sum(1 for v in validations if v.applied and v.assertion_passed)
-    improved = sum(1 for v in verdicts if v.behavioral_pass) if verdicts else 0
+
+    def _cat(v) -> str:
+        return getattr(v, "verdict_category", "unchanged")
+
+    improved = sum(
+        1 for v in verdicts
+        if _cat(v) == "improved" and not getattr(v, "regressed", False)
+    )
+    inconclusive = sum(1 for v in verdicts if _cat(v) == "inconclusive")
+    unchanged = sum(
+        1 for v in verdicts
+        if _cat(v) == "unchanged" and not getattr(v, "regressed", False)
+    )
+    regressed = sum(
+        1 for v in verdicts
+        if getattr(v, "regressed", False) or _cat(v) == "regressed"
+    )
+    scorable = [v for v in verdicts if _cat(v) != "inconclusive"]
     avg_score = (
-        sum(v.improvement_score for v in verdicts) / len(verdicts)
-        if verdicts else 0
+        sum(v.improvement_score for v in scorable) / len(scorable)
+        if scorable else 0
     )
 
     table = Table(box=box.SIMPLE, show_header=False)
@@ -284,13 +339,31 @@ def show_final_summary(
     table.add_row("Fixes validated (assertion passed)", f"{validated_count}/{applied_count}")
 
     if verdicts:
-        color = "green" if improved == len(verdicts) else "yellow"
+        total = len(verdicts)
+        improved_color = "green" if improved == total else "yellow"
         table.add_row(
-            "Behavioral probe improved",
-            f"[{color}]{improved}/{len(verdicts)}[/]",
+            "Improved (probe demonstrated fix worked)",
+            f"[{improved_color}]{improved}/{total}[/]",
         )
+        if inconclusive:
+            # Inconclusive ≠ failure; surface separately so the user doesn't
+            # misread these as broken fixes.
+            table.add_row(
+                "Inconclusive (probe didn't trigger the bug)",
+                f"[blue]{inconclusive}/{total}[/]",
+            )
+        if unchanged:
+            table.add_row(
+                "Unchanged (fix did not alter behavior)",
+                f"[yellow]{unchanged}/{total}[/]",
+            )
+        if regressed:
+            table.add_row(
+                "Regressed (fix introduced a new problem)",
+                f"[red]{regressed}/{total}[/]",
+            )
         table.add_row(
-            "Average improvement score",
+            "Average score (excludes inconclusive)",
             f"[bold]{avg_score:.1f}/10[/bold]",
         )
 

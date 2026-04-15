@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 from typing import Optional, Union
 
@@ -23,6 +24,9 @@ from models import (
 )
 from loader import KNOWN_KEYS
 from principles import CANONICAL_PRINCIPLES_TEXT
+from schema_registry import build_registry_from_json_text
+
+logger = logging.getLogger(__name__)
 
 
 SystemPrompt = Union[str, list[dict]]
@@ -63,7 +67,7 @@ def _empty_model_stats() -> dict:
 
 
 class LLM:
-    def __init__(self, model: str = "claude-sonnet-4-6"):
+    def __init__(self, model: str = "claude-haiku-4-5"):
         self.client = anthropic.Anthropic()
         self.model = model
         # Per-model running totals. Each model_id maps to a dict of counters.
@@ -101,14 +105,27 @@ class LLM:
         max_tokens: int = 4096,
         model: Optional[str] = None,
     ) -> str:
-        """Plain text response. `system` may be a str or a list of content blocks."""
+        """Plain text response. `system` may be a str or a list of content blocks.
+
+        Uses streaming for large max_tokens to avoid the SDK's 10-minute
+        non-streaming timeout guard (triggers around ~21k output tokens).
+        """
         model_id = model or self.model
-        response = self.client.messages.create(
-            model=model_id,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        kwargs = {
+            "model": model_id,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        if max_tokens > 16000:
+            with self.client.messages.stream(**kwargs) as stream:
+                for _ in stream.text_stream:
+                    pass
+                final = stream.get_final_message()
+            self._record(model_id, final.usage)
+            return final.content[0].text
+
+        response = self.client.messages.create(**kwargs)
         self._record(model_id, response.usage)
         return response.content[0].text
 
@@ -117,43 +134,68 @@ class LLM:
         system: SystemPrompt,
         user: str,
         schema: type,
-        max_tokens: int = 8192,
+        max_tokens: int = 16000,
         model: Optional[str] = None,
+        max_retries: int = 2,
     ):
-        """Structured JSON -> Pydantic model. Retries once on parse failure."""
+        """Structured JSON -> Pydantic model. Retries on parse failure.
+
+        Extraction is lenient: strips markdown fences, then falls back to
+        first-`{` / last-`}` carving so a stray preamble does not fail the
+        whole call. Retries feed the parse error back to the model.
+        """
         json_instruction = (
             "\n\nYou MUST respond with valid JSON only. "
             "No markdown, no code fences, no explanation outside the JSON."
         )
         full_system = _append_to_system(system, json_instruction)
 
-        text = self._extract_json(self.call(full_system, user, max_tokens, model=model))
+        last_err: Optional[Exception] = None
+        current_user = user
 
-        try:
-            return schema.model_validate(json.loads(text))
-        except (json.JSONDecodeError, Exception) as first_err:
-            # Retry once with error feedback
-            retry_user = (
-                f"Your previous response was not valid JSON.\n"
-                f"Error: {first_err}\n\n"
-                f"Please return ONLY valid JSON matching the required schema.\n\n"
-                f"Original request:\n{user}"
-            )
-            text2 = self._extract_json(
-                self.call(full_system, retry_user, max_tokens, model=model)
-            )
-            return schema.model_validate(json.loads(text2))
+        for attempt in range(max_retries + 1):
+            raw = self.call(full_system, current_user, max_tokens, model=model)
+            text = self._extract_json(raw)
+            try:
+                return schema.model_validate(json.loads(text))
+            except Exception as err:
+                last_err = err
+                logger.warning(
+                    "call_json parse failure (attempt %d/%d) for %s: %s",
+                    attempt + 1, max_retries + 1, schema.__name__, err,
+                )
+                current_user = (
+                    f"Your previous response could not be parsed as valid JSON matching the "
+                    f"{schema.__name__} schema.\nError: {err}\n\n"
+                    f"Return ONLY valid JSON. No markdown, no prose.\n\n"
+                    f"Original request:\n{user}"
+                )
+
+        assert last_err is not None
+        raise last_err
 
     @staticmethod
     def _extract_json(raw: str) -> str:
-        """Strip markdown code fences if the model wrapped its JSON."""
+        """Best-effort isolation of the JSON blob in an LLM response.
+
+        Handles: code fences (```json ... ```), prose preambles/postambles,
+        and bare JSON. Returns the raw string unchanged if no obvious carving
+        improves it, so json.loads still surfaces the original error.
+        """
         text = raw.strip()
         if text.startswith("```"):
             lines = text.split("\n")
-            lines = lines[1:]  # drop opening ```json
+            lines = lines[1:]  # drop opening ```json (or ```)
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
-            text = "\n".join(lines)
+            text = "\n".join(lines).strip()
+
+        # If the model wrapped its JSON in prose, carve on outermost braces.
+        if not (text.startswith("{") and text.endswith("}")):
+            first = text.find("{")
+            last = text.rfind("}")
+            if first != -1 and last > first:
+                text = text[first:last + 1]
         return text
 
 
@@ -167,12 +209,15 @@ HAIKU_MODEL = "claude-haiku-4-5"
 # ---------------------------------------------------------------------------
 
 PRINCIPLES_INSTRUCTION = """\
-You are a senior AI prompt engineer specialising in healthcare voice agents.
-You have been given a canonical library of quality principles (above) and a
-specific voice-agent system prompt to evaluate (below).
+You are a senior AI prompt engineer. You have been given a canonical library
+of quality principles (above) and a specific conversational-agent system
+prompt to evaluate (below).
 
 Your job is to produce an ADAPTIVE BRIEF that focuses downstream passes on
-the principles most load-bearing for THIS specific prompt.
+the principles most load-bearing for THIS specific prompt. The tool was
+originally tuned for healthcare voice agents, so be careful to stay
+domain-agnostic — infer what this prompt actually is and let that drive your
+selections, rather than assuming a booking workflow.
 
 Your brief must contain:
 
@@ -181,12 +226,15 @@ Your brief must contain:
    indicate voice), the prompt's language ("phone call", "SMS", "chat"), and
    the overall interaction style. If ambiguous, default to "unknown".
 
-2. domain_signals — short tags describing the domain. For a healthcare
-   voice agent you would expect e.g. ["healthcare", "scheduling",
-   "appointment_management"]. Include any compliance-relevant tags when
-   PHI/HIPAA cues are present.
+2. domain — a single short slug identifying the primary domain. Examples:
+   "healthcare", "fintech", "insurance", "customer_support",
+   "telecom", "ecommerce", "travel", "scheduling", "unknown". Pick the single
+   closest tag based on the prompt's vocabulary, tool set, and workflows.
 
-3. active_principles — the MOST load-bearing subset of canonical principles
+3. domain_signals — 2-6 short tags adding nuance ("scheduling",
+   "compliance", "phi", "fraud_check", "subscription_mgmt", etc.).
+
+4. active_principles — the MOST load-bearing subset of canonical principles
    for this prompt. MAXIMUM 12 entries. BE SELECTIVE: choose only principles
    that THIS specific prompt visibly violates or is at clear risk of
    violating. Do NOT list every principle that is theoretically applicable —
@@ -198,13 +246,13 @@ Your brief must contain:
    - reason: one short sentence naming WHY this principle is load-bearing
      for THIS specific input (reference concrete features of the prompt)
 
-4. interaction_contract — a single short paragraph (2–4 sentences) that
+5. interaction_contract — a single short paragraph (2–4 sentences) that
    summarises the expected interaction style for this agent given the
-   detected modality and domain. For voice + scheduling, this should mention
-   brief transactional replies, one targeted follow-up at a time, confirming
-   key fields once, never dumping policy text.
+   detected modality and domain. Tailor wording to the domain (e.g. voice
+   scheduling gets "brief transactional replies, one question at a time";
+   chat fraud-check gets "confirm intent before destructive actions").
 
-5. structure_notes — 1–2 sentences describing the prompt's current structure
+6. structure_notes — 1–2 sentences describing the prompt's current structure
    as it relates to cacheability and readability (e.g. is static policy kept
    separate from per-call variables? are there section boundaries? are tools
    listed by name or described in prose?).
@@ -215,6 +263,7 @@ input prompt — not generic restatements of the principle.
 Return ONLY valid JSON matching this schema:
 {
   "modality": "voice",
+  "domain": "healthcare",
   "domain_signals": ["healthcare", "scheduling"],
   "active_principles": [
     {"id": "STYLE-01", "reason": "Prompt contains multi-paragraph instructions for a voice call where long replies break the call"},
@@ -241,25 +290,49 @@ def _principles_system_blocks() -> list[dict]:
     ]
 
 
-def _fallback_brief(prompt_text: str, tools_json: Optional[str]) -> PrinciplesBrief:
+def _fallback_brief(
+    prompt_text: str,
+    tools_json: Optional[str],
+    reason: str = "LLM call failed",
+) -> PrinciplesBrief:
     """Deterministic brief when the LLM call fails or returns malformed JSON.
 
-    Modality inferred from tool names; active principles are the universally
-    applicable subset so downstream passes still receive useful guidance.
+    Modality and domain inferred heuristically from the prompt + tool names;
+    active principles are the universally applicable subset so downstream
+    passes still receive useful guidance. Healthcare-specific principles are
+    only included when healthcare signals are actually present.
     """
     low_text = prompt_text.lower()
     low_tools = (tools_json or "").lower()
 
+    # Modality
     if "send_sms" in low_tools or "transfer_call" in low_tools:
         modality: str = "voice"
     elif "phone call" in low_text or "voice" in low_text:
         modality = "voice"
     elif "sms" in low_tools or "text message" in low_text:
         modality = "sms"
+    elif "chat" in low_text or "message the user" in low_text:
+        modality = "chat"
     else:
         modality = "unknown"
 
-    signals = ["healthcare"] if "patient" in low_text or "appointment" in low_text else []
+    # Domain inference (keyword-driven; cheap heuristic for fallback path only)
+    domain_keywords = [
+        ("healthcare", ("patient", "appointment", "provider", "clinic", "medical")),
+        ("fintech", ("transaction", "account balance", "fraud", "card", "refund")),
+        ("insurance", ("policy", "claim", "coverage", "deductible")),
+        ("ecommerce", ("order", "shipment", "return", "cart")),
+        ("telecom", ("subscriber", "plan", "outage")),
+        ("travel", ("booking", "flight", "itinerary", "reservation")),
+    ]
+    domain = "unknown"
+    signals: list[str] = []
+    for tag, kws in domain_keywords:
+        if any(kw in low_text for kw in kws):
+            if domain == "unknown":
+                domain = tag
+            signals.append(tag)
     if "schedule" in low_text or "appointment" in low_text:
         signals.append("scheduling")
 
@@ -269,34 +342,41 @@ def _fallback_brief(prompt_text: str, tools_json: Optional[str]) -> PrinciplesBr
         ("TOOL-01", "Check for blanket 'always use' tool-use wording"),
         ("TOOL-04", "Parameter formats in prose must match tool schemas"),
         ("TOOL-06", "Tool failure handling is commonly missing"),
-        ("ELIG-01", "Eligibility pre-checks before slot offers in healthcare"),
-        ("STYLE-01", "Modality-appropriate length for voice replies"),
+        ("STYLE-01", "Modality-appropriate response length"),
         ("GUARD-01", "One targeted follow-up on ambiguity"),
-        ("CONTENT-01", "Notifications must carry the 5-Ws"),
-        ("SAFE-01", "Atomicity for reschedule-style multi-step operations"),
+        ("SAFE-01", "Atomicity for multi-step side-effect operations"),
     ]
-    active = [ActivePrinciple(id=pid, reason=reason) for pid, reason in defaults]
+    if domain == "healthcare":
+        defaults.extend([
+            ("ELIG-01", "Eligibility pre-checks before slot offers"),
+            ("CONTENT-01", "Notifications must carry the 5-Ws"),
+        ])
+    active = [ActivePrinciple(id=pid, reason=r) for pid, r in defaults]
 
     return PrinciplesBrief(
         modality=modality,  # type: ignore[arg-type]
-        domain_signals=signals,
+        domain=domain,
+        domain_signals=list(dict.fromkeys(signals)),
         active_principles=active,
         interaction_contract=(
-            "Voice-modality healthcare agent. Keep replies brief and "
-            "transactional. Ask one targeted follow-up at a time. Confirm "
-            "the 5 key fields (provider, location, date, time, visit type) "
-            "once after a successful booking. Never read out full policy "
-            "tables."
+            f"{modality.title()}-modality {domain} agent. Keep replies concise "
+            "and on-task, ask one follow-up at a time when information is "
+            "missing, confirm key fields before irreversible actions, and "
+            "avoid dumping policy text to the caller."
         ),
         structure_notes=(
-            "Principles brief generated by deterministic fallback — LLM "
-            "call failed. Downstream passes evaluate against the default "
-            "active-principles set."
+            f"Principles brief generated by deterministic fallback "
+            f"(reason: {reason}). Downstream passes evaluate against the "
+            "default active-principles set."
         ),
     )
 
 
 MAX_ACTIVE_PRINCIPLES = 12
+
+# Judge score (1-10) that marks a fix as a clear behavioral improvement.
+# Scores 4-6 are "partial" and do NOT count as behavioral_pass.
+BEHAVIORAL_PASS_THRESHOLD = 7
 
 
 def establish_principles(
@@ -306,10 +386,16 @@ def establish_principles(
 
     Uses Haiku for speed + cost. Falls back to a deterministic brief if the
     LLM call or JSON parse fails, so the pipeline never crashes on Pass 0.
+    Attaches a deterministic tool_schema_registry so downstream passes can
+    cross-reference tool constraints systematically.
     """
+    registry = build_registry_from_json_text(tools_json)
+
     user_content = f"<prompt>\n{prompt_text}\n</prompt>"
     if tools_json:
         user_content += f"\n\n<tool_definitions>\n{tools_json}\n</tool_definitions>"
+    if registry:
+        user_content += f"\n\n{registry}"
 
     try:
         brief = llm.call_json(
@@ -319,12 +405,16 @@ def establish_principles(
             max_tokens=4096,
             model=HAIKU_MODEL,
         )
-    except Exception:
-        return _fallback_brief(prompt_text, tools_json)
+    except Exception as err:
+        logger.warning("Pass 0 LLM call failed, using deterministic fallback: %s", err)
+        brief = _fallback_brief(prompt_text, tools_json, reason=str(err)[:80])
 
     # Safety net: enforce the cap even if the LLM overshoots.
     if len(brief.active_principles) > MAX_ACTIVE_PRINCIPLES:
         brief.active_principles = brief.active_principles[:MAX_ACTIVE_PRINCIPLES]
+
+    # Attach the deterministic registry regardless of LLM success.
+    brief.tool_schema_registry = registry
     return brief
 
 
@@ -335,9 +425,10 @@ def _format_brief_for_passes(brief: Optional[PrinciplesBrief]) -> str:
     active = "\n".join(
         f"- {p.id}: {p.reason}" for p in brief.active_principles
     )
-    return (
+    block = (
         "<principles_brief>\n"
         f"modality: {brief.modality}\n"
+        f"domain: {brief.domain}\n"
         f"domain_signals: {', '.join(brief.domain_signals) or '(none)'}\n"
         f"interaction_contract: {brief.interaction_contract}\n"
         f"structure_notes: {brief.structure_notes}\n"
@@ -345,6 +436,9 @@ def _format_brief_for_passes(brief: Optional[PrinciplesBrief]) -> str:
         f"{active}\n"
         "</principles_brief>"
     )
+    if brief.tool_schema_registry:
+        block += "\n\n" + brief.tool_schema_registry
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -352,37 +446,50 @@ def _format_brief_for_passes(brief: Optional[PrinciplesBrief]) -> str:
 # ---------------------------------------------------------------------------
 
 DETECTION_PROMPT = """\
-You are an expert AI prompt engineer specializing in voice agent quality assurance.
-Analyze the voice agent system prompt for quality issues across three dimensions:
+You are an expert AI prompt engineer performing quality assurance on a
+conversational agent system prompt. The agent may be voice, chat, or SMS; may
+operate in any domain (healthcare, fintech, insurance, customer support,
+etc.). Use the <principles_brief> (modality, domain, active_principles) and
+the <tool_schema_registry> (if present) to shape your analysis rather than
+assuming a healthcare booking workflow.
 
-PATIENT EXPERIENCE — issues causing robotic tone, inadequate empathy, unnatural speech,
-poor de-escalation, missing emotional handling for distressed/angry/confused callers,
-insufficient personality definition, phone-inappropriate verbosity.
+Analyze the prompt for quality issues across three dimensions:
 
-WORKFLOW ADHERENCE — issues causing incorrect tool behavior: parameter format mismatches
-between different tools, missing error handling, dangerous operation ordering (e.g. cancel
-before rebook with no rollback), business rule contradictions, missing guard conditions
-before irreversible actions, ambiguous decision trees, missing workflow paths, instructions
-referencing capabilities that don't exist in the tool definitions.
+CALLER EXPERIENCE — issues causing robotic tone, inadequate empathy,
+unnatural speech for the given modality, poor de-escalation, missing
+emotional handling for upset/confused callers, insufficient personality
+definition, modality-inappropriate verbosity. Use dimension
+"patient_experience" (legacy label; applies to all caller-experience issues
+regardless of domain).
+
+WORKFLOW ADHERENCE — issues causing incorrect tool behavior: parameter
+format mismatches between different tools, missing error handling,
+dangerous operation ordering (e.g. destructive action before backup/rollback),
+business rule contradictions, missing guard conditions before irreversible
+actions, ambiguous decision trees, missing workflow paths, instructions
+referencing capabilities that don't exist in the tool definitions. Use
+dimension "workflow_adherence".
 
 PRINCIPLES — violations of the active canonical principles listed in the
-<principles_brief> block that accompanies the input. Each active principle has an ID
-(e.g. STYLE-01, TOOL-04, CONTENT-01, SAFE-01). Search the prompt for the violation
-signature of each active principle and raise one issue per concrete violation. Assign
-issue IDs in the form "PRIN-<PRINCIPLE-ID>" (e.g. "PRIN-STYLE-01", "PRIN-CONTENT-01")
-and set dimension to "principles". Only raise a principles issue when the prompt
-actually violates the principle — do not raise one just because the principle is listed.
+<principles_brief> block. Each active principle has an ID (e.g. STYLE-01,
+TOOL-04, CONTENT-01, SAFE-01). Search the prompt for the violation signature
+of each active principle and raise one issue per concrete violation. Assign
+issue IDs in the form "PRIN-<PRINCIPLE-ID>" and set dimension to
+"principles". Only raise a principles issue when the prompt actually violates
+the principle — do not raise one just because the principle is listed.
 
-IMPORTANT: You must also analyze the tool definitions (parameters, types, formats) and
-cross-reference them against the prompt instructions. Look for format mismatches between
-tools, missing parameters in instructions, and instructions that reference tools or
-capabilities that don't exist.
+SYSTEMATIC SCHEMA CROSS-REFERENCE (if <tool_schema_registry> is present):
+walk each tool's declared params and verify that any prose instructions in
+the prompt about that param (format strings, enums, required fields) match
+the registry. Mismatches are high-severity TOOL-04-style issues even when
+subtle. If the registry is missing, fall back to reading the tool_definitions
+JSON directly.
 
 For each issue:
 - Quote the EXACT text from the prompt as evidence (copy-paste verbatim)
 - Rate severity: critical (breaks behavior silently), high (user-facing problem), \
 medium (quality degradation), low (minor improvement)
-- Assign an ID: WA-XX for workflow adherence, PE-XX for patient experience, \
+- Assign an ID: WA-XX for workflow adherence, PE-XX for caller experience, \
 PRIN-<ID> for principle violations
 - Only report genuine issues that would affect production calls, not stylistic preferences
 
@@ -403,8 +510,10 @@ Return JSON matching this schema:
 }"""
 
 REFLECTION_PROMPT = """\
-You are reviewing a list of quality issues found in a voice agent prompt.
-Your job is to critique this list rigorously.
+You are reviewing a list of quality issues found in a conversational agent
+prompt. Your job is to critique this list rigorously. The agent may be in
+any domain — use the <principles_brief> domain/modality to calibrate what
+counts as a real issue versus a stylistic preference.
 
 REMOVE any issues that are:
 - False positives (the prompt actually handles it correctly elsewhere — check carefully)
@@ -412,16 +521,15 @@ REMOVE any issues that are:
 - Duplicates of other issues in the list
 - Too vague or speculative to be actionable
 - Principles issues raised against a principle that the prompt does NOT actually violate
+- Domain-inapplicable (e.g. flagging a missing "eligibility check" on a non-scheduling agent)
 
 ADD any obvious high-severity issues that were missed, especially:
-- Tool parameter format mismatches between different tools
+- Tool parameter format/enum mismatches (cross-check against <tool_schema_registry>)
 - Missing instructions for tool failure/error scenarios
 - Dangerous operation ordering (irreversible actions without safety checks)
 - Business rules stated but unenforceable with available tools
 - Missing workflow paths for common caller scenarios
 - Violations of active principles in the <principles_brief> not already captured
-  (especially: modality-inappropriate verbosity, missing SMS 5-Ws, non-atomic multi-step
-  side effects, blanket "always use tool X" wording, static/variable intermixing)
 
 For each issue you keep or add, verify the evidence quote is accurate.
 
@@ -475,19 +583,43 @@ fix changes agent behavior at the EXACT decision point where the bug lives.
    - Include all necessary prior context as given facts
    - Ask the agent to describe what it does next, including specific tool call parameters
 
-   BAD probe: "I'd like to book an appointment." (too early — agent responds with \
-greeting/verification, identical for both original and fixed prompts)
+   ADVERSARIAL FRAMING (CRITICAL): A capable agent will often do the right thing by \
+reading tool schemas or applying general common sense — even when the prompt is \
+silent or wrong on the rule. If your probe does not make the WRONG behavior \
+tempting, both the original and fixed agent will produce the same correct output \
+and the judge will rule the comparison "inconclusive" (a wasted verification). \
+Before committing the probe, ask yourself: "If the agent ignored the fixed prompt \
+text entirely, could it still arrive at the correct answer from the tool schema or \
+obvious context?" If yes, the probe is too easy — add a distractor that baits the \
+original prompt's failure mode:
+     - For format bugs: supply the data in a DIFFERENT format than required (e.g. \
+"current_time returned 2026-04-14; the patient said June 5th 2026" — invites \
+copying YYYY-MM-DD when the tool wants DD-MM-YYYY).
+     - For ordering bugs: make the wrong-order path look equally natural (e.g. \
+"the patient said yes to the new slot" — invites immediate cancel-then-book).
+     - For missing-parameter bugs: describe the scenario without naming the \
+parameter, so the original prompt's omission is the only thing stopping the agent \
+from forgetting it.
+     - For workflow-sequence bugs: end the scenario at the precise step BEFORE the \
+one that is usually skipped, not after it.
+
+   BAD probe: "I'd like to book an appointment." (too early — identical behavior)
+   BAD probe: "What format do you pass for start_date?" (schema tells the agent \
+the format; both prompts answer the same.)
 
    GOOD probe: "You have verified the patient (Jane Doe, DOB 1985-03-15, patient_id \
 P-1234). She wants to cancel her appointment with Dr. Chen at 3:00 PM today. The \
-current time is 1:00 PM (within 24 hours). You are about to call cancel_appointment. \
-What parameters do you include in the tool call, and what do you say to the patient?"
+current time is 1:00 PM. You are about to call cancel_appointment. What parameters \
+do you include, and what do you say to the patient?"
+   GOOD probe: "You have verified the patient. She wants to reschedule her physical \
+to the June 24th 9 AM slot you just confirmed. She said 'yes, that works.' What is \
+the exact sequence of your next tool calls and speech?" (the natural-feeling \
+wrong path is cancel → book; the right path is book → cancel)
 
-   For PATIENT EXPERIENCE issues, the probe should place the agent in a conversational \
-moment where tone/empathy matters:
-   GOOD probe: "The patient has just said: 'I'm really frustrated, I've been trying to \
-get an appointment for weeks and nobody has helped me.' You need to respond. What do \
-you say?"
+   For CALLER EXPERIENCE issues (dimension "patient_experience"), the probe \
+should place the agent in a conversational moment where tone/empathy matters:
+   GOOD probe: "The caller has just said: 'I'm really frustrated, I've been trying to \
+resolve this for weeks and nobody has helped me.' You need to respond. What do you say?"
 
    For PRINCIPLES issues, a probe is still required in the schema but it is optional \
 for verification — the pipeline verifies principles-issues via the structural assertion \
@@ -541,40 +673,52 @@ JUDGE_PROMPT = """\
 You are an objective, skeptical evaluator comparing two voice agent behavioral \
 descriptions at the same decision point in a workflow.
 
-An improvement ONLY counts if:
-1. The specific problem behavior actually changed (not just different wording of the \
-same action)
-2. The tool call parameters, operation ordering, or conditions checked are different \
-in a way that addresses the issue
-3. No new problems were introduced by the fix
-4. The response is still natural and appropriate for a phone call
+Your job is to decide which of four categories best fits the comparison, then assign \
+a 1-10 score consistent with that category.
 
-Score on a 1-10 scale:
-- 1-3: No meaningful improvement — same tool parameters, same operation order, same \
-conditions (or lack thereof)
-- 4-6: Partial improvement — some behavioral change but incomplete or introduces \
-minor concerns
-- 7-9: Clear improvement — the specific issue is resolved with correct tool \
-parameters / ordering / conditions
-- 10: Complete resolution — issue fully fixed, all parameters correct, no concerns
+CATEGORIES:
+- "improved": The fixed behavior clearly resolves the stated issue — tool parameters, \
+ordering, conditions, or speech changed in a way that directly addresses the root \
+cause, and the original behavior was actually exhibiting the bug. Score 7-10.
 
-FOCUS ON CONCRETE DIFFERENCES:
-- Compare TOOL_CALLS parameters between original and fixed — did the right parameters \
-get added/changed?
-- Compare CONDITIONS_CHECKED — did the agent check something it previously skipped?
-- Compare operation ordering — did the sequence of actions change as expected?
-- For patient experience issues: compare SPEECH — did tone, empathy, or escalation \
-path change?
+- "inconclusive": The ORIGINAL behavior was already correct for this scenario. Both \
+behaviors pass the same tool parameters / check the same conditions / produce the \
+same appropriate speech, and both are the *right* thing to do. The probe scenario \
+did not actually exercise the failure mode described in the issue. This is NOT a \
+fix failure — it's a probe-design failure. Score 1-3 (reflects that no improvement \
+can be measured, not that the fix is bad). Use this when you notice the original \
+already does the correct thing.
 
-Be skeptical. Default to lower scores unless the improvement is clearly demonstrated \
-in the structured output.
+- "unchanged": The fix did NOT meaningfully alter the problematic behavior. Either \
+the output is identical AND still wrong, or changes are cosmetic (wording, added \
+conditions list entries) without altering tool calls / ordering / enforced \
+conditions. The bug is still present. Score 1-4.
+
+- "regressed": The fix introduced a NEW problem — removed a clarification step, \
+made an unwarranted assumption, dropped a required parameter, changed tone \
+inappropriately. Score 1-3.
+
+Partial improvements — fix addresses part of the issue but misses another part, or \
+changes ordering but leaves a sub-rule violated — go under "unchanged" with score \
+4-6. Do NOT call partial wins "improved".
+
+FOCUS ON CONCRETE DIFFERENCES between original and fixed:
+- TOOL_CALLS parameters — did the right params get added/changed/removed?
+- CONDITIONS_CHECKED — did the agent actually check something it previously skipped, \
+or was the new entry just restated intent?
+- Operation ordering — did the sequence of tool calls change as expected?
+- SPEECH — for caller-experience issues, did tone / empathy / escalation path change?
+
+Be skeptical and precise. If the original already produced the correct output, \
+choose "inconclusive" — do not reward the fix for matching behavior that was already \
+right.
 
 Return JSON:
 {
-  "improvement_detected": true,
-  "improvement_score": 7,
-  "explanation": "Quote the specific tool parameters or conditions that changed",
-  "remaining_concerns": "Any remaining issues, or null if fully resolved"
+  "verdict": "improved" | "inconclusive" | "unchanged" | "regressed",
+  "improvement_score": 1-10,
+  "explanation": "Quote the specific tool parameters, conditions, or speech that did or didn't change, and state why the verdict fits.",
+  "remaining_concerns": "What still needs fixing (if unchanged/regressed), what a sharper probe should test (if inconclusive), or null (if improved)"
 }"""
 
 ASSERTION_CHECK_PROMPT = """\
@@ -646,7 +790,7 @@ def detect(
 
     # Detection pass
     raw = llm.call_json(
-        _detection_system(), user_content, DetectionResult, max_tokens=16000
+        _detection_system(), user_content, DetectionResult, max_tokens=32000
     )
 
     # Reflection pass — critique and refine
@@ -660,7 +804,7 @@ def detect(
         reflection_input += f"\n\n{brief_block}"
 
     refined = llm.call_json(
-        _reflection_system(), reflection_input, DetectionResult, max_tokens=16000
+        _reflection_system(), reflection_input, DetectionResult, max_tokens=32000
     )
     return refined
 
@@ -684,8 +828,15 @@ def analyze(
     prompt_text: str,
     issues: list[Issue],
     brief: Optional[PrinciplesBrief] = None,
+    retry_feedback: Optional[str] = None,
 ) -> AnalysisResult:
-    """Propose anchor-based fixes with assertions and behavioral probes."""
+    """Propose anchor-based fixes with assertions and behavioral probes.
+
+    When `retry_feedback` is provided, it is embedded in the user message so
+    the LLM sees *why* its prior proposals failed (judge verdict, remaining
+    concerns, or probe-design issues) and can propose a different fix —
+    different anchor, different new_content, or a sharper adversarial probe.
+    """
     issues_json = json.dumps([i.model_dump() for i in issues], indent=2)
     user_content = (
         f"<prompt>\n{prompt_text}\n</prompt>"
@@ -694,8 +845,19 @@ def analyze(
     brief_block = _format_brief_for_passes(brief)
     if brief_block:
         user_content += f"\n\n{brief_block}"
+    if retry_feedback:
+        user_content += (
+            "\n\n<prior_attempt_feedback>\n"
+            "Your previous fix proposals for these issues did not fully resolve them. "
+            "Review the verdicts below and propose DIFFERENT fixes — change the "
+            "anchor, reshape new_content to address what the judge flagged, or "
+            "design a sharper adversarial behavioral_probe if the verdict was "
+            "'inconclusive' (meaning the prior probe didn't exercise the bug).\n\n"
+            f"{retry_feedback}\n"
+            "</prior_attempt_feedback>"
+        )
     result = llm.call_json(
-        _analysis_system(), user_content, AnalysisResult, max_tokens=16000
+        _analysis_system(), user_content, AnalysisResult, max_tokens=32000
     )
 
     # Post-fill dimension from the source Issue so verify-routing is robust
@@ -736,13 +898,21 @@ def _find_block_boundaries(text: str, pos: int) -> tuple[int, int]:
     return block_start, block_end
 
 
-def _fuzzy_find(text: str, anchor: str, threshold: float = 0.75) -> int:
-    """Find approximate match for anchor in text. Returns position or -1."""
+def _fuzzy_find(
+    text: str, anchor: str, threshold: float = 0.75
+) -> tuple[int, float]:
+    """Find the best approximate match for anchor in text.
+
+    Returns (position, ratio). Position is -1 if ratio is below threshold.
+    The ratio is always surfaced so the caller can expose confidence to
+    the UI.
+    """
     best_ratio = 0.0
     best_pos = -1
     anchor_len = len(anchor)
+    if anchor_len == 0 or anchor_len > len(text):
+        return -1, 0.0
 
-    # Slide a window across the text
     for i in range(len(text) - anchor_len + 1):
         candidate = text[i:i + anchor_len]
         ratio = difflib.SequenceMatcher(None, anchor, candidate).ratio()
@@ -750,57 +920,135 @@ def _fuzzy_find(text: str, anchor: str, threshold: float = 0.75) -> int:
             best_ratio = ratio
             best_pos = i
 
-    return best_pos if best_ratio >= threshold else -1
+    if best_ratio < threshold:
+        return -1, best_ratio
+    return best_pos, best_ratio
 
 
-def _apply_single_fix(text: str, proposal: FixProposal) -> tuple[str, str]:
+def _all_occurrences(text: str, needle: str) -> list[int]:
+    """Return every start offset where needle occurs in text."""
+    if not needle:
+        return []
+    out: list[int] = []
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            return out
+        out.append(idx)
+        start = idx + 1
+
+
+def _disambiguate_duplicate_anchor(
+    text: str, positions: list[int], context_hint: Optional[str]
+) -> Optional[int]:
+    """Pick the occurrence whose surrounding block best matches context_hint.
+
+    Returns the chosen position, or None if no clear winner. The context hint
+    is the proposal.anchor_context (e.g. "Cancellation section"); we score by
+    normalised token overlap with the block text around each occurrence.
+    """
+    if not context_hint or not context_hint.strip():
+        return None
+
+    hint_tokens = {
+        t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", context_hint)
+    }
+    if not hint_tokens:
+        return None
+
+    scores: list[tuple[int, int]] = []  # (score, pos)
+    for pos in positions:
+        block_start, block_end = _find_block_boundaries(text, pos)
+        # Widen a bit so section headings immediately above the paragraph count too.
+        window = text[max(0, block_start - 200):min(len(text), block_end + 200)]
+        window_tokens = {
+            t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", window)
+        }
+        scores.append((len(hint_tokens & window_tokens), pos))
+
+    scores.sort(reverse=True)
+    best_score, best_pos = scores[0]
+    second_score = scores[1][0] if len(scores) > 1 else -1
+
+    # Refuse to pick if the top match isn't meaningfully better than the
+    # runner-up — that ambiguity is what silently produces wrong edits.
+    if best_score == 0 or best_score == second_score:
+        return None
+    return best_pos
+
+
+def _apply_single_fix(
+    text: str, proposal: FixProposal
+) -> tuple[str, str, Optional[float], str]:
     """Apply a single fix using anchor-based location.
 
-    Returns (modified_text, method) where method is one of:
-    exact_anchor, fuzzy_anchor, or failed.
+    Returns (modified_text, method, confidence, reason) where:
+      - method ∈ {"exact_anchor", "fuzzy_anchor", "failed"}
+      - confidence is the fuzzy match ratio when method == "fuzzy_anchor",
+        else None
+      - reason is a short human-readable explanation (empty on success)
     """
     anchor = proposal.anchor_text
 
     # Strategy 1: exact anchor match
-    pos = text.find(anchor)
+    positions = _all_occurrences(text, anchor)
+    if len(positions) == 1:
+        pos = positions[0]
+    elif len(positions) > 1:
+        chosen = _disambiguate_duplicate_anchor(
+            text, positions, proposal.anchor_context
+        )
+        if chosen is None:
+            logger.warning(
+                "Ambiguous anchor for %s: %d occurrences, no clear winner from context",
+                proposal.issue_id, len(positions),
+            )
+            return (
+                text,
+                "failed",
+                None,
+                (
+                    f"Anchor appears {len(positions)} times and anchor_context "
+                    "did not pick a clear winner — refusing to guess."
+                ),
+            )
+        pos = chosen
+        logger.info(
+            "Disambiguated anchor for %s: chose offset %d of %d via context",
+            proposal.issue_id, pos, len(positions),
+        )
+    else:
+        pos = -1
+
     if pos != -1:
-        # Verify uniqueness
-        if text.find(anchor, pos + 1) != -1:
-            # Anchor appears multiple times — try to disambiguate by finding
-            # the one closest to the anchor_context section
-            pass  # Fall through to apply at first occurrence (usually correct)
-
         block_start, block_end = _find_block_boundaries(text, pos)
-
         if proposal.fix_type == "replace":
             text = text[:block_start] + proposal.new_content + text[block_end:]
         else:  # insert_after
             text = text[:block_end] + "\n\n" + proposal.new_content + text[block_end:]
-
-        return text, "exact_anchor"
+        return text, "exact_anchor", None, ""
 
     # Strategy 2: fuzzy anchor match
-    pos = _fuzzy_find(text, anchor)
-    if pos != -1:
-        block_start, block_end = _find_block_boundaries(text, pos)
-
+    fuzzy_pos, ratio = _fuzzy_find(text, anchor)
+    if fuzzy_pos != -1:
+        block_start, block_end = _find_block_boundaries(text, fuzzy_pos)
         if proposal.fix_type == "replace":
             text = text[:block_start] + proposal.new_content + text[block_end:]
         else:  # insert_after
             text = text[:block_end] + "\n\n" + proposal.new_content + text[block_end:]
+        return text, "fuzzy_anchor", ratio, ""
 
-        return text, "fuzzy_anchor"
-
-    return text, "failed"
+    return text, "failed", None, f"Anchor not found (best fuzzy ratio: {ratio:.2f})."
 
 
 def _llm_assisted_fix(text: str, proposal: FixProposal) -> Optional[str]:
     """Fallback: use LLM to apply a fix on a LOCAL section of the prompt."""
     # Find the best approximate location and extract ~1500 chars around it
-    pos = _fuzzy_find(text, proposal.anchor_text, threshold=0.5)
+    pos, _ratio = _fuzzy_find(text, proposal.anchor_text, threshold=0.5)
     if pos == -1:
-        # Last resort: search for keywords from anchor_context
-        pos = len(text) // 2  # middle of text
+        # Last resort: center the window on the middle of the text.
+        pos = len(text) // 2
 
     context_start = max(0, pos - 750)
     context_end = min(len(text), pos + 750)
@@ -836,7 +1084,7 @@ def apply_fixes(
     validations: list[FixValidation] = []
 
     for proposal in selected:
-        new_text, method = _apply_single_fix(text, proposal)
+        new_text, method, confidence, failure_reason = _apply_single_fix(text, proposal)
 
         if method == "failed":
             # Try LLM-assisted fallback on local section
@@ -851,7 +1099,8 @@ def apply_fixes(
                     applied=False,
                     method="failed",
                     assertion_passed=False,
-                    explanation="Could not locate anchor text in prompt.",
+                    explanation=failure_reason or "Could not locate anchor text in prompt.",
+                    match_confidence=confidence,
                 ))
                 continue
         else:
@@ -860,6 +1109,8 @@ def apply_fixes(
 
         # Validate: check assertion against the fixed text
         validation = _check_assertion(text, proposal, method)
+        if confidence is not None:
+            validation.match_confidence = confidence
         validations.append(validation)
 
     # Update the prompt field in the JSON
@@ -918,7 +1169,7 @@ def _check_assertion(
     # If simple checks don't pass, use LLM on the relevant section
     pos = fixed_text.find(proposal.anchor_text)
     if pos == -1:
-        pos = _fuzzy_find(fixed_text, proposal.anchor_text, threshold=0.5)
+        pos, _ratio = _fuzzy_find(fixed_text, proposal.anchor_text, threshold=0.5)
     if pos == -1:
         pos = len(fixed_text) // 2
 
@@ -938,14 +1189,19 @@ def _check_assertion(
             assertion_passed=result.passed,
             explanation=result.explanation,
         )
-    except Exception:
-        # If LLM check fails, be optimistic if the fix was applied
+    except Exception as err:
+        # Previously this was optimistic (returned passed=True). That masked
+        # real failures. Treat the inability to verify as an assertion failure
+        # so the downstream verification gate actually catches it.
+        logger.warning(
+            "Assertion LLM check failed for %s: %s", proposal.issue_id, err
+        )
         return FixValidation(
             issue_id=proposal.issue_id,
             applied=True,
             method=method,
-            assertion_passed=True,
-            explanation="Assertion check inconclusive; fix was applied.",
+            assertion_passed=False,
+            explanation=f"Assertion check could not complete ({err}).",
         )
 
 
@@ -985,18 +1241,108 @@ def _extract_key_phrases(assertion: str) -> list[str]:
 # Pass 4: Verification (structural + behavioral probe)
 # ---------------------------------------------------------------------------
 
+def _generate_followup(
+    probe_context: str,
+    agent_reply: str,
+    issue_description: str,
+    prior_turns: list[tuple[str, str]],
+) -> str:
+    """Ask a small LLM call to produce the next caller message in a probe trace."""
+    transcript = "\n\n".join(
+        f"CALLER: {u}\nAGENT: {a}" for u, a in prior_turns
+    )
+    user = (
+        f"<issue_being_tested>\n{issue_description}\n</issue_being_tested>\n\n"
+        f"<original_scenario>\n{probe_context}\n</original_scenario>\n\n"
+        f"<conversation_so_far>\n{transcript}\n</conversation_so_far>\n\n"
+        "Write the caller's next message."
+    )
+    try:
+        return llm.call(FOLLOWUP_GENERATOR_PROMPT, user, max_tokens=300).strip()
+    except Exception as err:
+        logger.warning("Follow-up generator failed: %s", err)
+        return "(follow-up could not be generated)"
+
+
+def _run_probe_trace(
+    system_prompt: str,
+    initial_user: str,
+    num_turns: int,
+    issue_id: str,
+    proposal: FixProposal,
+) -> str:
+    """Run a 1..N-turn probe against one system prompt and return a flat trace.
+
+    The caller message on each subsequent turn is generated by a helper LLM
+    that sees only the conversation so far + the issue description. This
+    mirrors the single-turn path when num_turns == 1, so no behavioural
+    change for callers that do not opt in.
+    """
+    first_reply = llm.call(system_prompt, initial_user)
+    if num_turns <= 1:
+        return first_reply
+
+    turns: list[tuple[str, str]] = [(initial_user, first_reply)]
+    trace_lines = [f"--- Turn 1 ---\nCALLER: {initial_user}\nAGENT: {first_reply}"]
+
+    issue_description = (
+        f"{proposal.fix_description} — root cause: {proposal.root_cause}. "
+        f"Assertion: {proposal.assertion}"
+    )
+
+    for turn_idx in range(2, num_turns + 1):
+        followup = _generate_followup(
+            proposal.behavioral_probe, first_reply, issue_description, turns
+        )
+        try:
+            reply = llm.call(system_prompt, followup)
+        except Exception as err:
+            logger.warning(
+                "Probe turn %d failed for %s: %s", turn_idx, issue_id, err
+            )
+            break
+        turns.append((followup, reply))
+        trace_lines.append(
+            f"--- Turn {turn_idx} ---\nCALLER: {followup}\nAGENT: {reply}"
+        )
+        first_reply = reply
+
+    return "\n\n".join(trace_lines)
+
+
+FOLLOWUP_GENERATOR_PROMPT = """\
+You are simulating a caller probing an agent for a known quality issue. You
+have already sent one message and received one response. Write the caller's
+NEXT message — a short, natural, on-topic follow-up that pressures the same
+decision point the original probe was targeting.
+
+The follow-up should:
+- Stay in character as the caller
+- React to something concrete in the agent's reply (disagreement, clarification, new detail)
+- Continue to exercise the issue being tested — do not drift to unrelated topics
+- Be 1-3 sentences max
+
+Return ONLY the caller's next message, no preamble."""
+
+
 def verify(
     issue_id: str,
     proposal: FixProposal,
     original_prompt: str,
     fixed_prompt: str,
     brief: Optional[PrinciplesBrief] = None,
+    num_turns: int = 1,
 ) -> VerificationResult:
     """Verify a fix via structural assertion check + behavioral probe comparison.
 
     For principles-dimension issues, skip the probe + judge path and emit a
     verdict from the structural assertion alone — these issues rarely have a
     clean mid-workflow decision point and produce noisy judge scores.
+
+    num_turns > 1 triggers multi-turn simulation: the caller's follow-ups are
+    generated by a separate LLM call (seeing only the conversation so far),
+    then replayed against BOTH original and fixed agents. The judge sees the
+    full traces.
     """
 
     # -- Prong A: Structural check --
@@ -1014,6 +1360,7 @@ def verify(
             structural_pass=structural_pass,
             behavioral_pass=structural_pass,
             improvement_score=8 if structural_pass else 2,
+            verdict_category="improved" if structural_pass else "unchanged",
             explanation=(
                 "Principles issue verified structurally via assertion. "
                 "No behavioral probe applicable for this principle."
@@ -1027,11 +1374,6 @@ def verify(
     probe_context = proposal.behavioral_probe
     brief_block = _format_brief_for_passes(brief)
 
-    probe_user = (
-        f"SCENARIO (mid-workflow state):\n{probe_context}\n\n"
-        f"What do you do next? Respond with SPEECH, TOOL_CALLS, and CONDITIONS_CHECKED."
-    )
-
     def _probe_system(system_prompt: str) -> str:
         parts = [PROBE_PROMPT]
         if brief_block:
@@ -1039,10 +1381,17 @@ def verify(
         parts.append(f"<system_prompt>\n{system_prompt}\n</system_prompt>")
         return "\n\n".join(parts)
 
-    # Probe with original prompt
-    orig_response = llm.call(_probe_system(original_prompt), probe_user)
-    # Probe with fixed prompt
-    fixed_response = llm.call(_probe_system(fixed_prompt), probe_user)
+    initial_user = (
+        f"SCENARIO (mid-workflow state):\n{probe_context}\n\n"
+        f"What do you do next? Respond with SPEECH, TOOL_CALLS, and CONDITIONS_CHECKED."
+    )
+
+    orig_response = _run_probe_trace(
+        _probe_system(original_prompt), initial_user, num_turns, issue_id, proposal
+    )
+    fixed_response = _run_probe_trace(
+        _probe_system(fixed_prompt), initial_user, num_turns, issue_id, proposal
+    )
 
     # -- Judge the difference (judge receives NO brief — stays channel-agnostic) --
     judge_input = json.dumps(
@@ -1062,11 +1411,20 @@ def verify(
     )
     verdict_data = llm.call_json(JUDGE_PROMPT, judge_input, JudgeRaw)
 
+    # behavioral_pass = only the "improved" category passes. Score threshold
+    # is enforced as a sanity check: a judge labeling something "improved"
+    # with score < 7 is inconsistent and gets demoted.
+    behavioral_pass = (
+        verdict_data.verdict == "improved"
+        and verdict_data.improvement_score >= BEHAVIORAL_PASS_THRESHOLD
+    )
+
     return VerificationResult(
         issue_id=issue_id,
         structural_pass=structural_pass,
-        behavioral_pass=verdict_data.improvement_detected,
+        behavioral_pass=behavioral_pass,
         improvement_score=verdict_data.improvement_score,
+        verdict_category=verdict_data.verdict,
         explanation=verdict_data.explanation,
         original_probe_response=orig_response,
         fixed_probe_response=fixed_response,

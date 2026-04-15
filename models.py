@@ -22,9 +22,16 @@ class PrinciplesBrief(BaseModel):
 
     modality: Modality
     domain_signals: list[str]                 # e.g. ["healthcare", "scheduling", "sms"]
+    # Primary domain classification used by the non-healthcare warning gate.
+    # "healthcare" is the tool's optimized domain; anything else triggers a notice.
+    domain: str = "unknown"
     active_principles: list[ActivePrinciple]  # subset of canonical library
     interaction_contract: str                 # one-paragraph tailored contract
     structure_notes: str                      # cacheability / layout observations
+    # Compact registry of tool param formats/enums/required fields. Populated
+    # deterministically from tool definitions (not by the LLM) so downstream
+    # passes receive structured cross-reference data.
+    tool_schema_registry: Optional[str] = None
 
 
 class Issue(BaseModel):
@@ -59,17 +66,28 @@ class FixValidation(BaseModel):
     method: Literal["exact_anchor", "fuzzy_anchor", "llm_fallback", "failed"]
     assertion_passed: bool
     explanation: str
+    # Approximate match ratio [0.0..1.0] when method is fuzzy_anchor; None otherwise.
+    match_confidence: Optional[float] = None
+
+
+VerdictCategory = Literal["improved", "inconclusive", "unchanged", "regressed"]
 
 
 class VerificationResult(BaseModel):
     issue_id: str
     structural_pass: bool
-    behavioral_pass: bool
-    improvement_score: int        # 1-10
+    behavioral_pass: bool          # True only for verdict=="improved"
+    improvement_score: int         # 1-10
+    # 4-way judge categorization. "inconclusive" means both behaviors were
+    # already correct — the probe didn't exercise the bug. Not a failure, just
+    # a signal that the next iteration needs a sharper adversarial probe.
+    verdict_category: VerdictCategory = "unchanged"
     explanation: str
     original_probe_response: str
     fixed_probe_response: str
     remaining_concerns: Optional[str] = None
+    iteration: int = 0
+    regressed: bool = False
 
 
 class DetectionResult(BaseModel):
@@ -89,7 +107,7 @@ class AssertionCheck(BaseModel):
 
 
 class JudgeRaw(BaseModel):
-    improvement_detected: bool
+    verdict: VerdictCategory
     improvement_score: int
     explanation: str
     remaining_concerns: Optional[str] = None
