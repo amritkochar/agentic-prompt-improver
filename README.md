@@ -6,7 +6,7 @@ Agentic CLI that analyzes a conversational agent system prompt, detects real qua
 
 ```bash
 pip3 install -r requirements.txt
-export ANTHROPIC_API_KEY="sk-ant-..."
+cp .env.example .env          # then edit .env and set your ANTHROPIC_API_KEY
 python3 main.py docs/assignment-agent-prompt.json
 ```
 
