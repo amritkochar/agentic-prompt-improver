@@ -7,7 +7,14 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from models import FixProposal, FixValidation, Issue, PrinciplesBrief, VerificationResult
+from models import (
+    FixProposal,
+    FixValidation,
+    Issue,
+    Lesson,
+    PrinciplesBrief,
+    VerificationResult,
+)
 
 console = Console()
 
@@ -35,6 +42,56 @@ METHOD_LABELS = {
 # ---------------------------------------------------------------------------
 # Header / progress
 # ---------------------------------------------------------------------------
+
+def panel(text: str) -> Panel:
+    """Thin shim around rich.Panel so callers don't need to import it directly."""
+    return Panel(text, border_style="yellow")
+
+
+CONFIDENCE_COLORS = {"high": "green", "medium": "yellow", "low": "dim"}
+
+
+def show_lessons_loaded(lessons: list[Lesson], memory_path: str) -> None:
+    """Render the lessons selected from the knowledge graph for this run.
+
+    Called after Pass 0.5 so the operator can see exactly which prior-run
+    guidance is about to be injected into the analysis prompt.
+    """
+    if not lessons:
+        console.print(
+            f"  [dim]No prior-run lessons matched (KG: {memory_path}).[/dim]"
+        )
+        console.print()
+        return
+
+    table = Table(
+        show_header=True, header_style="bold", box=box.SIMPLE,
+        pad_edge=False, padding=(0, 1),
+    )
+    table.add_column("ID", style="bold cyan", no_wrap=True)
+    table.add_column("Conf", no_wrap=True)
+    table.add_column("Sup", justify="right", no_wrap=True)
+    table.add_column("Lesson", overflow="fold")
+    table.add_column("Tags", style="dim", overflow="fold")
+
+    for l in lessons:
+        color = CONFIDENCE_COLORS.get(l.confidence, "white")
+        table.add_row(
+            l.id,
+            f"[{color}]{l.confidence}[/{color}]",
+            str(l.support),
+            l.text,
+            ", ".join(l.tags) if l.tags else "-",
+        )
+
+    console.print(Panel(
+        table,
+        title=f"[bold]Prior-Run Lessons (from {memory_path})[/bold]",
+        subtitle=f"[dim]{len(lessons)} lesson(s) will be injected into Pass 2 analysis[/dim]",
+        border_style="cyan",
+    ))
+    console.print()
+
 
 def show_header(agent_name: str, prompt_length: int):
     console.print()
@@ -73,6 +130,24 @@ def show_principles_summary(brief: PrinciplesBrief):
     )
     if ids:
         console.print(f"  [dim]{ids}[/dim]")
+
+    # Show the reason string next to each active principle so the operator
+    # can see WHY the brief picked it — this is the text downstream passes
+    # see in their <principles_brief> block.
+    if brief.active_principles:
+        principles_table = Table(
+            show_header=False, box=None, pad_edge=False, padding=(0, 1),
+        )
+        principles_table.add_column(style="bold cyan", no_wrap=True)
+        principles_table.add_column(style="dim", overflow="fold")
+        for p in brief.active_principles:
+            principles_table.add_row(p.id, p.reason)
+        console.print(Panel(
+            principles_table,
+            title="[bold]Active Principles (injected into detection + analysis)[/bold]",
+            border_style="dim",
+        ))
+
     console.print(Panel(
         brief.interaction_contract,
         title="[bold]Interaction Contract[/bold]",

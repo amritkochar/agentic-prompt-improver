@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 Dimension = Literal["patient_experience", "workflow_adherence", "principles"]
 
 Modality = Literal["voice", "chat", "sms", "mixed", "unknown"]
+
+LessonId = str
+Confidence = Literal["low", "medium", "high"]
 
 
 class ActivePrinciple(BaseModel):
@@ -58,6 +61,8 @@ class FixProposal(BaseModel):
     new_content: str              # text to insert or replace with
     assertion: str                # verifiable claim about the fixed prompt
     behavioral_probe: str         # mid-workflow scenario for testing
+    # IDs of prior-run lessons that informed this proposal (for attribution).
+    lessons_applied: list[LessonId] = Field(default_factory=list)
 
 
 class FixValidation(BaseModel):
@@ -111,3 +116,63 @@ class JudgeRaw(BaseModel):
     improvement_score: int
     explanation: str
     remaining_concerns: Optional[str] = None
+
+
+# -- Knowledge-graph models (persistent cross-run memory) --
+
+class Lesson(BaseModel):
+    """A consolidated, human-readable rule derived from multiple prior runs.
+
+    Carries tags so the lesson-selector can match it against the current
+    run's domain / modality / active-principle ids / issue patterns without
+    another LLM call.
+    """
+    id: LessonId                           # "LSN-001"
+    text: str                              # the rule itself
+    tags: list[str] = Field(default_factory=list)
+    confidence: Confidence = "medium"
+    support: int = 1                       # how many runs back this up
+    last_seen: str = ""                    # ISO date of most recent supporting run
+
+
+class Triple(BaseModel):
+    """A (head, relation, tail) edge in the graph, with support counts.
+
+    Triples are the episodic layer; Lessons are the semantic consolidation
+    of recurring triple patterns.
+    """
+    head: str
+    relation: str
+    tail: str
+    support: int = 1
+    last_seen: str = ""
+
+
+class RunRecord(BaseModel):
+    """One past run's summary — kept in the KG's run log section."""
+    run_id: str                            # e.g. "run-2026-04-15T14:22"
+    prompt_file: str                       # source file name only (no path)
+    prompt_hash: str                       # short sha of the prompt text
+    domain: str
+    modality: str
+    total_issues: int
+    improved: int
+    unchanged: int
+    inconclusive: int
+    regressed: int
+    notes: str = ""                        # free-text highlights worth remembering
+
+
+class KnowledgeGraph(BaseModel):
+    """In-memory view of `memory/knowledge_graph.md`."""
+    lessons: list[Lesson] = Field(default_factory=list)
+    triples: list[Triple] = Field(default_factory=list)
+    runs: list[RunRecord] = Field(default_factory=list)
+
+
+class KGUpdate(BaseModel):
+    """Return shape of the Haiku consolidation pass."""
+    lessons: list[Lesson]
+    triples: list[Triple]
+    new_lesson_ids: list[LessonId] = Field(default_factory=list)
+    retired_lesson_ids: list[LessonId] = Field(default_factory=list)
