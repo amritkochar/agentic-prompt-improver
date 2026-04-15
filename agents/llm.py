@@ -14,6 +14,9 @@ import logging
 from typing import Optional, Union
 
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
