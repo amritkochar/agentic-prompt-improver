@@ -72,6 +72,8 @@ instance/
 docs/*
 !docs/prompts/
 !docs/task/
+!docs/overview.md
+!docs/principles.md
 
 # PyBuilder
 .pybuilder/
