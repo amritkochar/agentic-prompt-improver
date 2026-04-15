@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from models import ActivePrinciple, PrinciplesBrief
-from principles import CANONICAL_PRINCIPLES_TEXT
-from schema_registry import build_registry_from_json_text
+from core.models import ActivePrinciple, PrinciplesBrief
+from core.principles import CANONICAL_PRINCIPLES_TEXT
+from core.schema_registry import build_registry_from_json_text
 
 from .llm import HAIKU_MODEL, _cached_block, llm
 from .prompts import PRINCIPLES_INSTRUCTION

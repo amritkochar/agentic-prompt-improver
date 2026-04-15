@@ -13,13 +13,34 @@ import logging
 import re
 from typing import Optional
 
-from loader import KNOWN_KEYS
-from models import AssertionCheck, FixProposal, FixValidation
+from core.loader import KNOWN_KEYS
+from core.models import AssertionCheck, FixProposal, FixValidation
 
 from .llm import llm
 from .prompts import ASSERTION_CHECK_PROMPT, LLM_FIX_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# ── Tunable thresholds ───────────────────────────────────────────────────────
+
+# Minimum similarity ratio for a fuzzy anchor match to be accepted as a fix site.
+# Below this the fix falls through to the LLM fallback.
+_FUZZY_THRESHOLD = 0.75
+
+# Minimum similarity for the LLM fallback to locate a 1,500-char edit window.
+# Lower than _FUZZY_THRESHOLD intentionally — we just need a rough neighbourhood.
+_FUZZY_LLM_THRESHOLD = 0.50
+
+# If a paragraph block is wider than this many chars, fall back to single-line
+# matching to avoid replacing a wall of text for a narrow anchor.
+_MAX_BLOCK_SIZE = 2000
+
+# Half-width of the local context window handed to the LLM fallback editor.
+_LLM_WINDOW_HALF = 750
+
+# How many characters of new_content to check as a quick assertion shortcut
+# before falling back to the LLM assertion verifier.
+_ASSERTION_CONTENT_PREFIX = 80
 
 
 # ── Anchor primitives ────────────────────────────────────────────────────────
@@ -32,7 +53,7 @@ def _find_block_boundaries(text: str, pos: int) -> tuple[int, int]:
     block_end = text.find("\n\n", pos)
     block_end = block_end if block_end != -1 else len(text)
 
-    if block_end - block_start > 2000:
+    if block_end - block_start > _MAX_BLOCK_SIZE:
         single_start = text.rfind("\n", 0, pos)
         single_start = single_start + 1 if single_start != -1 else 0
         single_end = text.find("\n", pos)
@@ -44,7 +65,7 @@ def _find_block_boundaries(text: str, pos: int) -> tuple[int, int]:
 
 
 def _fuzzy_find(
-    text: str, anchor: str, threshold: float = 0.75
+    text: str, anchor: str, threshold: float = _FUZZY_THRESHOLD
 ) -> tuple[int, float]:
     """Best approximate match for `anchor` in `text`. Returns (pos, ratio)."""
     best_ratio = 0.0
@@ -172,12 +193,12 @@ def _apply_single_fix(
 
 def _llm_assisted_fix(text: str, proposal: FixProposal) -> Optional[str]:
     """Last-resort fallback: ask an LLM to edit a ~1500-char local window."""
-    pos, _ratio = _fuzzy_find(text, proposal.anchor_text, threshold=0.5)
+    pos, _ratio = _fuzzy_find(text, proposal.anchor_text, threshold=_FUZZY_LLM_THRESHOLD)
     if pos == -1:
         pos = len(text) // 2
 
-    context_start = max(0, pos - 750)
-    context_end = min(len(text), pos + 750)
+    context_start = max(0, pos - _LLM_WINDOW_HALF)
+    context_end = min(len(text), pos + _LLM_WINDOW_HALF)
     section = text[context_start:context_end]
 
     system = LLM_FIX_PROMPT.format(
@@ -271,7 +292,7 @@ def _check_assertion(
             explanation=f"Key content found in fixed prompt (matched: {key_phrases[0][:50]}...).",
         )
 
-    if proposal.new_content[:80] in fixed_text:
+    if proposal.new_content[:_ASSERTION_CONTENT_PREFIX] in fixed_text:
         return FixValidation(
             issue_id=proposal.issue_id,
             applied=True,
@@ -282,7 +303,7 @@ def _check_assertion(
 
     pos = fixed_text.find(proposal.anchor_text)
     if pos == -1:
-        pos, _ratio = _fuzzy_find(fixed_text, proposal.anchor_text, threshold=0.5)
+        pos, _ratio = _fuzzy_find(fixed_text, proposal.anchor_text, threshold=_FUZZY_LLM_THRESHOLD)
     if pos == -1:
         pos = len(fixed_text) // 2
 

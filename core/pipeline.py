@@ -11,7 +11,7 @@ import logging
 import traceback
 
 import agents
-import ui
+from . import ui
 
 logger = logging.getLogger("prompt_improver.pipeline")
 

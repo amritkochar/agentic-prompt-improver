@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from models import (
+from .models import (
     FixValidation,
     Issue,
     KnowledgeGraph,
@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KG_PATH = Path("memory/knowledge_graph.md")
 
+# KG size caps — large enough to accumulate meaningful signal, small enough
+# to stay readable and keep consolidation prompts within a sensible token budget.
 MAX_LESSONS = 30
 MAX_TRIPLES = 150
 MAX_RUNS_IN_LOG = 20

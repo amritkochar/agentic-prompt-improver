@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Iterable
 
-from models import FixValidation, KGUpdate, KnowledgeGraph, RunRecord, VerificationResult
+from core.models import FixValidation, KGUpdate, KnowledgeGraph, RunRecord, VerificationResult
 
 from .llm import HAIKU_MODEL, llm
 from .prompts import CONSOLIDATION_PROMPT

@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Optional
 
-from models import FixProposal, JudgeRaw, PrinciplesBrief, VerificationResult
+from core.models import FixProposal, JudgeRaw, PrinciplesBrief, VerificationResult
 
 from .fix_engine import extract_key_phrases
 from .llm import llm

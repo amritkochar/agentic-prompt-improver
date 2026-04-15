@@ -7,7 +7,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from models import (
+from .models import (
     FixProposal,
     FixValidation,
     Issue,

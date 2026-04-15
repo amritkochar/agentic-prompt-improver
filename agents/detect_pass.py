@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from models import DetectionResult, PrinciplesBrief
-from principles import CANONICAL_PRINCIPLES_TEXT
+from core.models import DetectionResult, PrinciplesBrief
+from core.principles import CANONICAL_PRINCIPLES_TEXT
 
 from .llm import _cached_block, llm
 from .principles_pass import format_brief_for_passes

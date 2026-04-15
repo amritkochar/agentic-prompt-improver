@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 import agents
-import ui
-from pipeline import build_summary
+from . import ui
+from .pipeline import build_summary
 
 
 def write_report(

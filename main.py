@@ -18,11 +18,11 @@ import click
 from dotenv import load_dotenv
 
 import agents
-import loader
-import memory as kg_mem
-import ui
-from pipeline import build_summary, run_fix_verify_loop
-from reporting import write_report
+from core import loader
+from core import memory as kg_mem
+from core import ui
+from core.pipeline import build_summary, run_fix_verify_loop
+from core.reporting import write_report
 
 load_dotenv()
 
