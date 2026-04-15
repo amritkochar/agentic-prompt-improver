@@ -4,452 +4,341 @@
     "domain_signals": [
       "scheduling",
       "appointment_management",
-      "medical_practice",
-      "compliance",
-      "phi"
+      "patient_verification",
+      "insurance_eligibility",
+      "provider_coordination"
     ],
     "domain": "healthcare",
     "active_principles": [
       {
+        "id": "STRUCT-01",
+        "reason": "Variable placeholders ({{current_time_America/New_York}}, {{user_number}}) appear early in the prompt alongside static provider and location details, rather than in a dedicated trailing context block. This breaks prompt caching efficiency."
+      },
+      {
         "id": "STYLE-01",
-        "reason": "Identity verification instructions ask for 'first name. Then ask for their last name. Then ask for their date of birth' \u2014 three separate questions in sequence, which is appropriate. However, the appointment slot-offer pattern states 'I have availability on Monday June 5th at 10 AM or Wednesday June 7th at 2:30 PM' \u2014 two options at once \u2014 which is acceptable. The larger risk is in sections like 'Confirm which appointment they mean' where the agent reads back multiple fields; voice modality requires strict single-focus, short replies."
+        "reason": "Instructions for voice replies contain multi-sentence guidance without explicit brevity caps. For example, the scheduling flow instructs the agent to offer two slot options with full details ('I have availability on Monday June 5th at 10 AM or Wednesday June 7th at 2:30 PM with Dr. Torres at our Main Office. Which works better for you?'), but does not constrain total reply length or enforce single-turn focus for voice modality."
       },
       {
         "id": "GUARD-01",
-        "reason": "The prompt instructs: 'If they do not like those times, ask what day or time works better and search again. You can search up to 3 times.' But does not specify the phrasing or structure of the follow-up question. Risk: the agent may ask 'What day works better and what time?' (bundled two-item question) rather than isolating day first, then time."
-      },
-      {
-        "id": "TOOL-03",
-        "reason": "For `get_available_slots`, the prompt does not explicitly state the minimum information the agent must gather before calling the tool. The instruction 'ask what kind of appointment they want' and 'do they want in-person or telehealth' implies these are required, but does not explicitly list them as prerequisites nor validate all needed parameters (provider_id, location_id, appointment_type, start_date) are collected before the first slot search."
+        "reason": "The identity verification flow instructs 'Ask for their first name. Then ask for their last name. Then ask for their date of birth.' This sequences three separate asks correctly, but elsewhere in scheduling ('ask if they have a preference for which doctor they want to see. Also ask if they want in-person or telehealth') instructions bundle multiple questions, risking stacked-question antipattern in voice."
       },
       {
         "id": "TOOL-04",
-        "reason": "`get_available_slots` schema requires `start_date` in 'DD-MM-YYYY format', but the prompt contains examples using 'Monday June 5th' and 'June eighth' \u2014 conversational date formats. No instruction converts spoken dates to the required DD-MM-YYYY schema before calling the tool."
+        "reason": "The get_available_slots tool schema specifies start_date in 'DD-MM-YYYY format', but the prompt does not explicitly instruct the agent to format dates this way when calling the tool. Elsewhere, dates are described verbally (e.g. 'Monday June 5th'), creating a silent mismatch risk."
       },
       {
-        "id": "TOOL-06",
-        "reason": "No explicit failure-handling instruction for `get_available_slots` returning no matches. The prompt says 'If after 3 searches they still have not found a time they like, offer to put them on a waitlist' but does not address the case where the tool returns zero slots (e.g. provider fully booked). Missing explicit 'if no slots found' clause."
+        "id": "TOOL-05",
+        "reason": "After book_appointment succeeds, the prompt instructs 'Your appointment has been booked. You will receive a text message with the details' followed by send_sms, but does not require the agent to read back the five key fields (provider, date, time, location, visit type) in speech before sending the SMS. This violates the one-confirmation-after-success pattern."
       },
       {
         "id": "ELIG-01",
-        "reason": "Eligibility rules (e.g. 'Dr. Chen does not accept new patients for annual physicals', 'Dr. Torres does not see patients under 5', 'Dr. Foster requires referral for new patients') are scattered throughout the provider section. No unified 'check eligibility before get_available_slots' instruction. Risk: the agent calls get_available_slots without first validating the patient meets all preconditions for that provider and visit type."
+        "reason": "Eligibility rules are scattered across provider descriptions and appointment-type sections (e.g. 'Dr. Chen does not accept new patients for annual physicals', 'Dr. Foster requires referral', 'telehealth not available for physicals'). The scheduling flow states 'Ask them what they need the appointment for' but does not explicitly instruct to validate all applicable eligibility rules before calling get_available_slots."
       },
       {
         "id": "ELIG-02",
-        "reason": "When a patient is ineligible (e.g. wants annual physical with Dr. Chen who is full, or is under 5 and wants Dr. Torres), the prompt provides guidance ('offer to try Dr. Patel instead') but does not consistently specify a plain one-sentence explanation plus fallback. Risk: agent gives a flat refusal without offering the nearest alternative."
+        "reason": "When a patient request fails an eligibility rule, the prompt provides only partial guidance. For example: 'If they do not have a referral [for Dr. Kim], tell them to ask their current pediatrician to send a referral.' This states the blocker but does not offer a next-best alternative or transfer target if the patient cannot easily obtain a referral."
       },
       {
-        "id": "CONTENT-01",
-        "reason": "The `send_sms` instruction states 'You will receive a text message with the details' and later 'Your appointment has been booked. You will receive a text message.' But the `send_sms` tool schema has a `message_type` parameter (appointment_booked, appointment_cancelled, etc.) with no explicit instruction on what the SMS body must contain. No requirement that the SMS include provider name, date, time, location, or visit type \u2014 the 5-Ws. Risk: SMS may be sent with only a confirmation ID, leaving patient uncertain about which appointment."
+        "id": "TOOL-06",
+        "reason": "The scheduling flow uses get_available_slots up to 3 times, but the prompt says 'If after 3 searches they still have not found a time they like, offer to put them on a waitlist.' There is no explicit instruction for what the agent does if get_available_slots returns zero slots on the first search, or how to handle a tool error vs. an empty result."
+      },
+      {
+        "id": "SAFE-01",
+        "reason": "The reschedule flow instructs 'Cancel the old appointment first using cancel_appointment. Then schedule a new appointment.' If get_available_slots returns no slots after cancellation, the prompt does not instruct the agent to restore or re-offer the old appointment. The flow is not atomic or rollback-aware."
       },
       {
         "id": "SAFE-02",
-        "reason": "For `cancel_appointment`, the prompt instructs: 'Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel...\" If they say yes, use cancel_appointment.' This covers verbal confirmation but does not explicitly require identity re-verification immediately before the cancellation call. Risk: if verification happened many turns ago, the agent may cancel the wrong appointment."
+        "reason": "The cancellation flow verifies identity, then asks which appointment to cancel, but does not require an explicit 'confirm this action' step before calling cancel_appointment. For irreversible actions like cancellation, the agent should read back the full details and wait for a yes/no confirmation before proceeding."
       },
       {
-        "id": "STRUCT-01",
-        "reason": "The prompt interleaves provider schedules (static policy) with per-call variables like 'The current time is {{current_time_America/New_York}}' and 'The caller's phone number is {{user_number}}' early in the document. Static provider/location/insurance sections appear mid-prompt, not at the top. No dedicated trailing block for per-call state variables. Risk: breaks LLM prefix caching."
-      },
-      {
-        "id": "TOOL-02",
-        "reason": "`get_available_slots` description in the tool schema is 'Get available appointment slots for a provider at a location. Returns array of slot objects...' This is adequate but the prompt prose does not clarify what happens if the tool returns empty array or what fields the agent should inspect from the returned slot object (e.g. slot_id, start_time, location_name) before presenting to the patient."
+        "id": "TOOL-01",
+        "reason": "Instructions use phrasing such as 'use find_patient to look them up' and 'use get_available_slots to search for openings' without explicit condition words. However, the broader instruction 'If they are an existing patient, you need to verify their identity' does set a condition. The risk is that other implied tool uses (e.g. checking insurance) lack explicit 'when' framing."
       },
       {
         "id": "CONSIST-02",
-        "reason": "Two overlapping rules without explicit precedence: (1) 'Patients can have up to 3 upcoming appointments at a time'; (2) 'For recurring appointments... you can only book one at a time.' Unclear precedence if a patient has 2 appointments and requests a 3-visit prenatal series \u2014 does the 3-appointment limit block booking the first prenatal, or does the 'one at a time' rule apply instead? No 'takes precedence' clause."
+        "reason": "Two rules apply to Dr. Patel scheduling: the prompt states 'she is on maternity leave starting March 15 2026 and returning June 1 2026' and separately 'do not offer her during that time.' However, the reschedule flow says 'If a patient has not been seen in over 3 years, they need to be scheduled as a new patient' without clarifying how this interacts with the 6-month advance-booking limit or the 3-upcoming-appointment cap."
       }
     ],
-    "interaction_contract": "Ava is a voice-based medical front desk assistant. Replies must be brief, transactional, and modality-appropriate: short sentences (max 1\u20132 per turn), one focused question per turn for identity verification or disambiguation, and clear confirmations after any action. All state-changing actions (book, cancel, confirm) require prior identity verification and explicit caller confirmation. Critical details (provider, date, time, location) are read back once after success, never repeatedly.",
-    "structure_notes": "The prompt mixes static content (provider schedules, insurance, appointment types, clinic policies) with per-call variables (current_time, caller phone number) in the opening section, breaking cacheability. Sections are marked with paragraphs and some bolded headers but lack consistent XML or markdown delimiters. Tool-call instructions are embedded in prose rather than listed as a distinct structured reference, making it hard to extract the exact pre-call validation contract.",
+    "interaction_contract": "Ava is a voice-first medical front desk assistant handling scheduling, cancellations, confirmations, and clinic information. Replies must be brief and transactional (1\u20132 short sentences per turn), ask one question at a time, and avoid reading policy text in full. After state-changing actions (book, cancel, confirm), read back the key details once in speech, then send an SMS. Identity verification and confirmation steps are mandatory before irreversible actions.",
+    "structure_notes": "The prompt mixes static content (provider schedules, locations, insurance list, appointment types, tool guidance) with variable placeholders ({{current_time}}, {{user_number}}) early on, breaking cacheability. Sections are organized by topic (scheduling, canceling, clinic info) with clear headers, but eligibility rules are scattered across provider and appointment-type subsections rather than in one pre-checks block.",
     "tool_schema_registry": "<tool_schema_registry>\nfind_patient(first_name, last_name, date_of_birth, phone, zip_code)\n  * first_name: string; desc=\"Patient first name\"\n  * last_name: string; desc=\"Patient last name\"\n  * date_of_birth: string; desc=\"Patient date of birth in YYYY-MM-DD format\"\n    phone: string; desc=\"Patient phone number\"\n    zip_code: string; desc=\"Patient zip code for disambiguation when multiple matches found\"\nfind_appointment(patient_id, status, date_from, date_to)\n  * patient_id: string; desc=\"The patient ID from find_patient result\"\n    status: string; desc=\"Filter by status: scheduled, confirmed, cancelled, completed, no_show. Omit to return all.\"\n    date_from: string; desc=\"Start date filter in YYYY-MM-DD\"\n    date_to: string; desc=\"End date filter in YYYY-MM-DD\"\nget_available_slots(provider_id, location_id, appointment_type, start_date, duration_minutes, modality)\n  * provider_id: string; desc=\"Provider ID \u2014 required to search for a specific provider's slots\"\n  * location_id: string; desc=\"Location ID where the appointment should be held\"\n  * appointment_type: string; desc=\"One of: new_patient, follow_up, annual_physical, sick_visit, telehealth, procedure, lab_review, prenatal, well_child, ur\"\n  * start_date: string; desc=\"Start date for search window in DD-MM-YYYY format\"\n    duration_minutes: integer; desc=\"Appointment duration in minutes\"\n    modality: string; desc=\"in_person or telehealth\"\nbook_appointment(patient_id, slot_id, provider_id, location_id, appointment_type, reason, modality, notes, referring_provider)\n  * patient_id: string; desc=\"Patient ID from find_patient\"\n  * slot_id: string; desc=\"Slot ID from get_available_slots result\"\n  * provider_id: string; desc=\"Provider ID\"\n  * location_id: string; desc=\"Location ID\"\n  * appointment_type: string; desc=\"Type of appointment being booked\"\n    reason: string; desc=\"Patient's reason for the visit\"\n  * modality: string; desc=\"in_person or telehealth\"\n    notes: string; desc=\"Additional notes \u2014 referral info, special needs, interpreter required, etc.\"\n    referring_provider: string; desc=\"Name of referring provider if applicable\"\ncancel_appointment(appointment_id, reason, cancelled_by, late_cancel)\n  * appointment_id: string; desc=\"Appointment ID to cancel\"\n    reason: string; desc=\"Reason for cancellation\"\n    cancelled_by: string; desc=\"Who is cancelling: patient, provider, office\"\n    late_cancel: boolean; desc=\"True if cancellation is within 24 hours of appointment time\"\nconfirm_appointment(appointment_id)\n  * appointment_id: string; desc=\"Appointment ID to confirm\"\ntransfer_call(destination, reason)\n  * destination: string; desc=\"Transfer destination: front_desk, billing, nurse_line, pharmacy, records, ext_4507\"\n    reason: string; desc=\"Brief reason for the transfer\"\nsend_sms(patient_id, message_type, language, appointment_id)\n  * patient_id: string; desc=\"Patient ID\"\n  * message_type: string; desc=\"Type: appointment_booked, appointment_cancelled, appointment_rescheduled, appointment_confirmed, general\"\n    language: string; desc=\"Message language: en or es\"\n    appointment_id: string; desc=\"Appointment ID to include details in the message\"\nend_call()\n</tool_schema_registry>"
   },
   "llm_stats": {
-    "claude-haiku-4-5": {
-      "calls": 58,
-      "input": 459815,
-      "cache_read": 16329,
-      "cache_create": 11390,
-      "output": 44518
+    "claude-haiku-4-5-20251001": {
+      "calls": 4,
+      "input": 64949,
+      "cache_read": 0,
+      "cache_create": 4466,
+      "output": 26112
+    },
+    "claude-sonnet-4-6": {
+      "calls": 73,
+      "input": 525303,
+      "cache_read": 13028,
+      "cache_create": 16743,
+      "output": 41929
     }
   },
   "detection": {
     "issues": [
       {
-        "id": "STRUCT-01",
-        "dimension": "principles",
-        "severity": "high",
-        "title": "Static and variable content interleaved; breaks LLM prefix caching",
-        "description": "Per-call variables ({{current_time_America/New_York}}, {{user_number}}) are placed immediately after the role statement, before static provider/location/insurance definitions. This breaks LLM prefix-caching strategy: static content should be cached once at the top; per-call variables should come last in a dedicated trailing block. Cost and latency impact on every call.",
-        "evidence": "After 'You are Ava, a virtual assistant...' the prompt immediately states 'The current time is {{current_time_America/New_York}}. The caller's phone number is {{user_number}}.' Then provider schedules and appointment type definitions follow. No dedicated 'Per-Call Context' section exists at the end.",
-        "location_hint": "Opening section, lines 2\u20134 after role definition"
-      },
-      {
-        "id": "TOOL-04",
-        "dimension": "principles",
-        "severity": "critical",
-        "title": "Date format mismatch: prompt prose uses conversational dates; get_available_slots schema requires DD-MM-YYYY",
-        "description": "The get_available_slots tool requires start_date in 'DD-MM-YYYY format' per the schema. The prompt uses conversational date phrasing ('Monday June 5th', 'June eighth', 'Thursday June 8th') and provides no instruction to convert spoken/written dates to DD-MM-YYYY before calling the tool. The agent will construct invalid tool calls when a patient requests a date.",
-        "evidence": "Tool schema: 'start_date: string; desc=\"Start date for search window in DD-MM-YYYY format\"'. Prompt examples: 'I have availability on Monday June 5th at 10 AM or Wednesday June 7th at 2:30 PM' and 'When reading dates, say the day of the week, the month, the date, and the time. Like \"Thursday, June eighth at eleven AM.\"' No instruction states 'convert the patient's requested date to DD-MM-YYYY format before calling get_available_slots'.",
-        "location_hint": "Scheduling section ('Now you need to find available times') vs. tool_schema_registry"
-      },
-      {
-        "id": "TOOL-03",
-        "dimension": "principles",
-        "severity": "high",
-        "title": "No explicit precondition checklist before get_available_slots call",
-        "description": "The get_available_slots tool requires provider_id, location_id, appointment_type, and start_date (all mandatory per schema). The prompt instructs the agent to 'ask what kind of appointment they want' and 'do they want in-person or telehealth', but never explicitly lists the minimum information that must be gathered before the first slot search. Missing provider_id or location_id will cause the tool to fail silently or return no results.",
-        "evidence": "Prompt states: 'Now you need to find available times. Use get_available_slots to search for openings.' This appears after 'ask if they have a preference for which doctor', with no explicit 'before calling get_available_slots, you must have: appointment_type, provider_id, location_id, and patient date preference' checklist. The prompt does not state which questions must be answered before the tool is invoked.",
-        "location_hint": "Scheduling section, 'Now you need to find available times'"
-      },
-      {
-        "id": "TOOL-06",
-        "dimension": "principles",
-        "severity": "high",
-        "title": "Incomplete failure-handling for get_available_slots: no explicit 'if no slots exist' instruction",
-        "description": "The prompt instructs: 'If after 3 searches they still have not found a time they like, offer to put them on a waitlist.' This handles user dissatisfaction, but does NOT explicitly address the case where get_available_slots returns an empty array\u2014i.e., the provider is fully booked with zero available slots. The agent has no instruction for this scenario, risking confusion or silent failure.",
-        "evidence": "Prompt says: 'If after 3 searches they still have not found a time they like, offer to put them on a waitlist' and 'If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives.' The second clause is vague: it does not specify the trigger condition (empty array from the tool) or how to detect 'no available slots at all' programmatically.",
-        "location_hint": "Scheduling section, 'If there are no available slots at all'"
-      },
-      {
-        "id": "ELIG-01",
-        "dimension": "principles",
-        "severity": "high",
-        "title": "Eligibility rules scattered; no unified pre-search validation step",
-        "description": "Eligibility constraints (age restrictions for Dr. Torres <5, referral requirements for Dr. Kim and Dr. Foster, new-patient rules, visit-type incompatibilities) are embedded throughout provider definitions and appointment-type descriptions. There is no single instruction that says 'before calling get_available_slots, validate the patient against all applicable eligibility rules for this provider and visit type.' The agent may call get_available_slots and then discover ineligibility, wasting a tool call.",
-        "evidence": "Eligibility rules scattered: 'Dr. Torres... He sees patients ages 5 and up only. He does not see patients under 5 \u2014 refer those to Dr. Kim' (provider section); 'Dr. Chen does not accept new patients for annual physicals' (provider section); 'NP Nguyen... She can see patients for sick visits, follow-ups, and telehealth only. She does not do annual physicals, new patient visits, procedures, or well-child checks' (provider section); 'Dr. Foster... New patients must have a referral from their primary care provider' (provider section). No unified instruction like 'Before searching for slots, verify eligibility: [checklist]'.",
-        "location_hint": "Provider definitions (scattered across multiple sections)"
-      },
-      {
-        "id": "CONTENT-01",
-        "dimension": "principles",
-        "severity": "critical",
-        "title": "SMS confirmation lacks mandatory 5-W specification; send_sms body content uncontrolled",
-        "description": "The prompt instructs: 'Then use send_sms to send them a confirmation' and 'You will receive a text message with the details.' But the send_sms tool schema accepts message_type (e.g., appointment_booked) and appointment_id with no specification in the prompt that the body MUST include provider name, date, time, location, and visit type. Patients may receive 'Your appointment has been confirmed' with no identifiable details.",
-        "evidence": "Prompt: 'After booking, say... Then use send_sms to send them a confirmation.' Tool schema: send_sms parameters include message_type and appointment_id, but the prompt contains no requirement that these map to a body containing the 5-Ws (provider, date, time, location, visit type). No instruction like 'The SMS body must include the provider name, date, time, location, and visit type.'",
-        "location_hint": "Scheduling section, 'After booking, say'; send_sms tool definition"
-      },
-      {
-        "id": "SAFE-02",
-        "dimension": "principles",
-        "severity": "high",
-        "title": "Identity verification not re-required immediately before irreversible cancel_appointment action",
-        "description": "The prompt instructs: 'Verify patient identity \u2014 first name, last name, date of birth, find_patient. Then use find_appointment...' for cancellation. However, if many turns elapse between verification and the final confirmation ('Just to confirm, you would like to cancel...'), there is no instruction to re-verify identity immediately before calling cancel_appointment. If the caller has been on hold or distracted, they may confirm cancellation of the wrong appointment without a fresh identity check.",
-        "evidence": "Cancellation section: 'Verify the patient identity \u2014 ask first name, last name, date of birth, use find_patient... Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel...\" If they say yes, use cancel_appointment.' There is no 're-verify identity' step between the read-back confirmation and the tool call.",
-        "location_hint": "Cancellation section"
-      },
-      {
         "id": "WA-01",
         "dimension": "workflow_adherence",
         "severity": "critical",
-        "title": "Missing provider_id and location_id mapping; cannot construct valid get_available_slots calls",
-        "description": "The get_available_slots tool requires provider_id and location_id as mandatory parameters. The prompt defines providers (Dr. Sarah Chen, Dr. Michael Torres, etc.) and locations (Main Office, West Hartford Branch, Glastonbury Office) by name only. There is no table, mapping, or registry of provider names to IDs or location names to IDs. The agent cannot call get_available_slots without these IDs but has no way to look them up.",
-        "evidence": "Tool schema: get_available_slots requires 'provider_id: string' and 'location_id: string' (both mandatory). Prompt defines providers as prose only: 'Dr. Sarah Chen, Internal Medicine...' and locations as prose: 'Main Office: 535 Wellness Boulevard...'. No ID mapping, registry table, or lookup instruction provided anywhere in the prompt.",
-        "location_hint": "Entire prompt; missing ID registry"
+        "title": "Reschedule flow cancels old appointment before confirming new slot exists \u2014 no rollback",
+        "description": "The rescheduling instructions direct the agent to cancel the old appointment first and then search for a new one. If get_available_slots returns no results after the cancellation, the patient is left with no appointment. There is no instruction to check availability first, hold the old appointment, or restore it if no new slot is found. This is the single most dangerous workflow ordering in the prompt.",
+        "evidence": "Cancel the old appointment first using cancel_appointment. The same cancellation policy applies \u2014 if it is within 24 hours, inform them of the possible fee. Then schedule a new appointment. Ask when they would like to come in. Use get_available_slots to find openings.",
+        "location_hint": "For rescheduling appointments section"
       },
       {
         "id": "WA-02",
         "dimension": "workflow_adherence",
-        "severity": "high",
-        "title": "Reschedule flow not atomic; old appointment cancelled before new slot confirmed",
-        "description": "The prompt instructs: 'Cancel the old appointment first using cancel_appointment. Then schedule a new appointment.' If cancel succeeds but the new booking fails (no slots found, patient changes mind), the old appointment is destroyed with no fallback. The prompt does not specify 'confirm new slot is available before canceling the old one' or 'if new booking fails, offer to restore the old appointment'.",
-        "evidence": "Rescheduling section: 'Cancel the old appointment first using cancel_appointment... Then schedule a new appointment. Ask when they would like to come in. Use get_available_slots to find openings.' No precondition like 'verify new slot availability before canceling' or rollback instruction if the new booking fails.",
-        "location_hint": "Rescheduling section"
+        "severity": "critical",
+        "title": "get_available_slots start_date format never specified \u2014 schema requires DD-MM-YYYY, prompt uses verbal dates",
+        "description": "The tool schema declares start_date as DD-MM-YYYY. The prompt never instructs the agent to format dates in this way when calling the tool \u2014 it describes dates verbally (e.g. 'Monday June 5th') and never converts them. An agent following the prompt will pass a verbal or ISO-format string, causing a silent parameter error on every slot search call. This affects all scheduling, rescheduling, and availability-check flows.",
+        "evidence": "Use get_available_slots to search for openings. Give them two options. Say something like \"I have availability on Monday June 5th at 10 AM or Wednesday June 7th at 2:30 PM with Dr. Torres at our Main Office.\"",
+        "location_hint": "For scheduling appointments section \u2014 slot search instructions; tool schema start_date field"
       },
       {
         "id": "WA-03",
         "dimension": "workflow_adherence",
-        "severity": "high",
-        "title": "Maternity leave rule for Dr. Patel not validated; agent may offer unavailable provider",
-        "description": "The prompt states: 'Dr. Patel is on maternity leave starting March 15 2026 and returning June 1 2026. During her leave, her patients should be scheduled with Dr. Chen.' However, there is no instruction to check the current date ({{current_time_America/New_York}}) against this date range before offering Dr. Patel as an alternative. If today is between 3/15 and 6/1, the agent must not offer Dr. Patel. No conditional logic provided.",
-        "evidence": "Provider definition: 'She is on maternity leave starting March 15 2026 and returning June 1 2026.' But the scheduling alternatives section says: 'Would you like to try Dr. Patel instead...?' with no date-range check. The prompt contains no instruction like 'if today is between March 15 2026 and June 1 2026, do not offer Dr. Patel; offer Dr. Chen instead'.",
-        "location_hint": "Provider definition and scheduling alternatives section"
+        "severity": "critical",
+        "title": "Waitlist capability instructed in two places with no backing tool in the catalog",
+        "description": "The scheduling flow instructs the agent to 'offer to put them on a waitlist' and 'make a note' after three failed slot searches, and again when Dr. Patel is on leave. No tool in the catalog supports creating a waitlist entry or storing a scheduling preference note. The agent has no way to execute this instruction \u2014 it will either fabricate success or stall.",
+        "evidence": "If after 3 searches they still have not found a time they like, offer to put them on a waitlist \u2014 take their preferred provider, date range, and time of day preference and make a note. / If they insist on seeing Dr. Patel, offer to put them on a waitlist for after June 1 2026.",
+        "location_hint": "For scheduling appointments section \u2014 slot search fallback; Dr. Patel leave section"
       },
       {
         "id": "WA-04",
         "dimension": "workflow_adherence",
         "severity": "high",
-        "title": "New patient vs. returning patient: last_visit_date gap not checked; rule unenforceable",
-        "description": "The prompt states: 'If a patient has not been seen in over 3 years, they need to be scheduled as a new patient even if they are already in the system.' However, the agent has no instruction to check the last_visit_date returned by find_patient and compare it to today's date. The agent will not know whether to treat the patient as new or returning, leading to booking the wrong appointment_type (follow_up vs. new_patient).",
-        "evidence": "Prompt: 'If a patient has not been seen in over 3 years, they need to be scheduled as a new patient even if they are already in the system.' The find_patient tool returns last_visit_date but the prompt never instructs the agent to inspect this field or calculate today - last_visit_date > 1095 days.",
-        "location_hint": "Scheduling section, 'Remember some important rules'"
+        "title": "send_sms never instructed to pass appointment_id \u2014 confirmation SMS will lack appointment details",
+        "description": "The send_sms schema includes an optional appointment_id field that, when supplied, causes the message to include appointment details (date, time, provider, location). The prompt instructs the agent to call send_sms after booking with message_type appointment_booked, but never instructs it to pass the appointment_id returned by book_appointment. The SMS will be sent without the details the patient is told to expect. This applies to the cancellation SMS path as well, where appointment_id would similarly anchor the message content.",
+        "evidence": "After booking, say \"Your appointment has been booked. You will receive a text message with the details.\" Then use send_sms to send them a confirmation.",
+        "location_hint": "For scheduling appointments section \u2014 post-booking instructions; send_sms tool schema appointment_id field"
       },
       {
         "id": "WA-05",
         "dimension": "workflow_adherence",
-        "severity": "critical",
-        "title": "Lab review ordering provider rule unimplemented; no tool to query ordering provider",
-        "description": "The prompt states: 'Lab review appointments have to be with the doctor who ordered the labs. If they say \"I want to review my bloodwork with Dr. Torres\" but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.' There is no tool available to query which provider ordered the labs, and no instruction on how to retrieve this information. The agent cannot enforce this rule.",
-        "evidence": "Prompt: 'Lab review appointments have to be with the doctor who ordered the labs. If they say... but Dr. Chen ordered the labs...' No tool in the tool_definitions (find_patient, find_appointment, get_available_slots, book_appointment, etc.) has capability to look up lab_ordering_provider. The agent cannot determine who ordered the labs.",
-        "location_hint": "Scheduling section, 'Remember some important rules'"
+        "severity": "high",
+        "title": "Tool failure and empty-result handling absent for get_available_slots, book_appointment, and cancel_appointment",
+        "description": "The prompt describes what to do after three patient-preference misses (waitlist) or when no slots exist in 30 days (offer alternative provider), but provides no instruction for what the agent should say or do if any of the three state-changing tools return a tool error, a network failure, or an unexpected empty response on the first call. There is no fallback path for book_appointment or cancel_appointment failures either \u2014 a failed cancellation during reschedule with no error path is especially dangerous given WA-01.",
+        "evidence": "Use get_available_slots to search for openings. Give them two options... You can search up to 3 times. If after 3 searches they still have not found a time they like, offer to put them on a waitlist. / Then use book_appointment to schedule it. / If they say yes, use cancel_appointment.",
+        "location_hint": "For scheduling, canceling, and rescheduling sections \u2014 no error clause for any tool"
       },
       {
         "id": "WA-06",
         "dimension": "workflow_adherence",
         "severity": "high",
-        "title": "3-appointment limit not enforced; no explicit instruction to check existing appointments before booking",
-        "description": "The prompt instructs: 'Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know and ask if they want to cancel one or speak with the front desk.' The find_appointment tool can retrieve future appointments, but the prompt does not explicitly instruct the agent to call find_appointment with status='scheduled' or 'confirmed' and count results before offering new slots. The check may be skipped.",
-        "evidence": "Prompt: 'Patients can have up to 3 upcoming appointments at a time. If they already have 3...' But the scheduling flow never explicitly says 'after verifying the patient, call find_appointment(status=\"scheduled\") to check their upcoming appointments before calling get_available_slots'. The instruction is missing.",
-        "location_hint": "Scheduling section, 'Remember some important rules'"
+        "title": "Eligibility pre-checks not enforced as a gate before calling get_available_slots",
+        "description": "Eligibility rules \u2014 provider-specific restrictions, visit-type restrictions, referral requirements, telehealth eligibility, age limits, maternity leave dates \u2014 are scattered across provider and appointment-type sections. The scheduling flow moves from gathering appointment type and provider preference directly to calling get_available_slots with no explicit instruction to validate all applicable restrictions first. An agent could offer and book a slot that violates eligibility (e.g. annual physical with Dr. Chen for a new patient, telehealth for a well-child check, Dr. Wright visit without referral or imaging) before the rule surfaces.",
+        "evidence": "Ok so once you have verified the patient, ask them what they need the appointment for. Ask them what kind of appointment they want. Ask if they have a preference for which doctor they want to see. Also ask if they want in-person or telehealth. If they do not have a provider preference, suggest an appropriate provider based on the appointment type... Now you need to find available times. Use get_available_slots to search for openings.",
+        "location_hint": "For scheduling appointments section \u2014 post-verification flow"
       },
       {
         "id": "WA-07",
         "dimension": "workflow_adherence",
         "severity": "high",
-        "title": "Annual physical 2-week advance requirement not validated; no logic to enforce minimum date",
-        "description": "The prompt states: 'Annual physicals need to be booked at least 2 weeks out from today. If someone wants a physical next week, explain the policy and find a date at least 2 weeks away.' But there is no instruction to compare the requested start_date against today + 14 days. The agent may proceed with a search without checking the constraint.",
-        "evidence": "Prompt: 'Annual physicals need to be booked at least 2 weeks out from today. If someone wants a physical next week, explain the policy and find a date at least 2 weeks away.' No conditional logic: no 'if start_date < current_date + 14 days, reject request and ask for later date'.",
-        "location_hint": "Scheduling section, 'Remember some important rules'"
+        "title": "Post-booking verbal read-back omitted \u2014 agent skips directly to SMS without confirming key fields in speech",
+        "description": "After book_appointment succeeds, the prompt instructs the agent to say 'Your appointment has been booked. You will receive a text message with the details' and then call send_sms. The five key fields (provider, date, time, location, visit type) are not required to be spoken before the SMS is sent. A misheard slot \u2014 wrong date, wrong provider, wrong location \u2014 will not be caught in the call. The prior verbal read-back ('So I have you down for...') happens before booking, not after, so it does not substitute for post-booking confirmation.",
+        "evidence": "Once they pick a time, read back all the details. Say \"So I have you down for a follow-up visit with Dr. Torres on Monday June 5th at 10 AM at our Main Office location. Is that correct?\" Wait for them to say yes. Then use book_appointment to schedule it. After booking, say \"Your appointment has been booked. You will receive a text message with the details.\" Then use send_sms to send them a confirmation.",
+        "location_hint": "For scheduling appointments section \u2014 post-booking instructions"
       },
       {
-        "id": "CONSIST-02",
-        "dimension": "principles",
+        "id": "WA-08",
+        "dimension": "workflow_adherence",
         "severity": "medium",
-        "title": "Overlapping appointment rules lack explicit precedence: 3-appointment limit vs. recurring-appointment one-at-a-time",
-        "description": "Two rules can conflict: (1) 'Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know...'; (2) 'For recurring appointments (like monthly follow-ups or prenatal series), you can only book one at a time.' If a patient with 2 existing appointments requests a 3-visit prenatal series, is the 3-appointment cap applied to block the first prenatal, or does 'one at a time' override it? No 'takes precedence' clause stated.",
-        "evidence": "Prompt contains both: 'Patients can have up to 3 upcoming appointments at a time' and 'For recurring appointments... you can only book one at a time.' These overlap when a patient is near capacity and requests a multi-visit series. No precedence rule stated.",
-        "location_hint": "Scheduling section, two separate bullet points under 'Remember some important rules'"
+        "title": "Multiple scheduling questions bundled in a single voice turn \u2014 stacked-question anti-pattern",
+        "description": "After verifying the patient, the scheduling flow asks for appointment reason, appointment type, provider preference, and in-person vs. telehealth in the same instructional block. Voice callers can hold one question at a time; bundling these causes the caller to answer only the last question and forces the agent to loop back or infer missing information.",
+        "evidence": "ask them what they need the appointment for. Ask them what kind of appointment they want. Ask if they have a preference for which doctor they want to see. Also ask if they want in-person or telehealth.",
+        "location_hint": "For scheduling appointments section \u2014 post-verification flow"
+      },
+      {
+        "id": "WA-09",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "Per-call variable placeholders placed mid-prompt before large static blocks \u2014 breaks prompt prefix caching",
+        "description": "The two per-call variables (current time and caller phone number) are embedded in the third paragraph, between the static location block and the full provider roster, insurance list, appointment types, and all tool guidance. Every call invalidates the cache at that point, preventing caching of all subsequent static content \u2014 the majority of the prompt.",
+        "evidence": "The current time is {{current_time_America/New_York}}. The caller's phone number is {{user_number}}.",
+        "location_hint": "Third paragraph of the prompt, between location details and provider list"
+      },
+      {
+        "id": "WA-10",
+        "dimension": "workflow_adherence",
+        "severity": "medium",
+        "title": "Cancellation confirmation phrasing is ambiguous about the mandatory wait-for-yes gate before cancel_appointment",
+        "description": "The cancellation flow correctly uses 'If they say yes, use cancel_appointment', but the same paragraph also says 'Confirm which appointment they mean. Then say [read-back]...' without explicitly marking the pause for patient confirmation as a mandatory gate. An agent reading the prose could interpret 'Then say...' as permission to proceed immediately to the tool call. Given that cancel_appointment is irreversible, the wait-for-affirmation gate should be unambiguous.",
+        "evidence": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your follow-up visit with Dr. Chen on Thursday June 8th at 11 AM. Is that right?\" If they say yes, use cancel_appointment.",
+        "location_hint": "For canceling appointments section"
       }
     ],
-    "analysis_notes": "Refined list from 20 to 13 issues by removing or merging the following: (1) Removed PE-01 (appointment readback verbosity)\u2014stylistic rather than a rule violation; the prompt does instruct one confirmation, not multiple; the length concern is implementation-level, not a principle breach. (2) Removed PE-02 (emergency handoff tone)\u2014the prompt does contain an emergency handoff instruction; tone is secondary to the directive action itself; 'tell them to hang up and call 911 immediately' is sufficiently urgent. (3) Removed ELIG-02 (policy-mismatch response inconsistency)\u2014both cases in the evidence provide a fallback or transfer option; the variation is minor and not a systematic violation. (4) Removed GUARD-01 (ambiguous 'day or time' bundling)\u2014minor phrasing risk, but the prompt also isolates identity questions correctly elsewhere; not systematic enough to warrant inclusion. (5) Merged WA-03 (maternity leave), WA-04 (3-year gap), WA-06 (3-appointment limit), WA-07 (2-week physical rule) as a single family, but kept separate because each has a distinct data source / tool gap and distinct trigger logic. (6) Confirmed TOOL-04, TOOL-03, TOOL-06, ELIG-01, CONTENT-01, SAFE-02, STRUCT-01, WA-01, WA-02, WA-05 are all correct and non-duplicative. (7) Confirmed CONSIST-02 is a genuine overlapping-rule issue with no stated precedence. Final list: 3 critical, 7 high, 3 medium. All issues are testable, reproducible, and actionable with concrete failure scenarios."
+    "analysis_notes": "Consolidation decisions: WA-01 and PRIN-SAFE-01 are the same root cause (cancel-before-check reschedule ordering) \u2014 kept as WA-01 with sharpened description. WA-02 and PRIN-TOOL-04 are the same root cause (DD-MM-YYYY format mismatch) \u2014 kept as WA-02. WA-03 and PRIN-TOOL-07 are the same root cause (missing waitlist tool) \u2014 kept as WA-03, evidence expanded to cite both locations. WA-05 and PRIN-TOOL-06 are the same root cause (no tool failure handling) \u2014 merged into WA-05 with evidence covering all three tools. WA-06 and PRIN-ELIG-01 are the same root cause (no eligibility gate before get_available_slots) \u2014 kept as WA-06. WA-07 and PRIN-TOOL-05 are the same root cause (post-booking verbal read-back) \u2014 kept as WA-07 with clarification that the pre-booking read-back is not a substitute. WA-08 (stacked questions) retained \u2014 genuine voice UX issue. WA-09 and PRIN-STRUCT-01 are the same root cause \u2014 kept as WA-09. WA-04 (cancellation verbal confirmation ambiguity) and PRIN-SAFE-02 are the same issue \u2014 merged into WA-10 and severity downgraded to medium because the prose does include 'If they say yes' which partially communicates the gate; the issue is ambiguity of phrasing, not complete absence of the check. WA-08 (send_sms missing appointment_id) retained as WA-04 \u2014 this is a concrete schema mismatch with direct user-facing consequence (SMS contains no details). PE-01 (frustrated patient handling) removed: the prompt does provide 'I understand' / 'I apologize' language and instructions to 'try to help them'; absence of a richer escalation path is a stylistic preference, not a concrete workflow failure reproducible in a defined scenario. PRIN-ELIG-02 (policy-mismatch response not constructive) removed: the prompt does provide alternatives in most eligibility failure cases (e.g. referral fax path for Dr. Kim, Dr. Chen substitute for Dr. Patel, 'offer alternative provider' for no-slots case); absence of a transfer target in every edge case is insufficiently concrete to be actionable as a single issue. CONSIST-02 (3-upcoming cap vs 6-month limit) removed: these rules do not contradict each other and the interaction is not a direct conflict. Final list: 10 issues, down from 18. All issues are grounded in verbatim evidence and reproducible as mid-workflow probe scenarios."
   },
   "analysis": {
     "proposals": [
       {
-        "issue_id": "STRUCT-01",
-        "dimension": "principles",
-        "root_cause": "Per-call variables ({{current_time_America/New_York}}, {{user_number}}) are placed immediately after the role statement, before static provider/location/insurance definitions. This breaks LLM prefix-caching strategy where static content should be at the top and per-call variables at the bottom.",
-        "impact_if_unfixed": "Every call incurs cache miss on static content block; per-call cost and latency increase measurably across the call volume.",
-        "fix_type": "replace",
-        "fix_description": "Move the two per-call variable statements from the opening section (after role definition) to a new dedicated 'Per-Call Context' section at the very end of the prompt, immediately before the 'When someone calls, start by saying...' greeting instruction. This allows the static provider/location/insurance/appointment-type content to be cached as a single prefix across all calls.",
-        "anchor_text": "The current time is {{current_time_America/New_York}}. The caller's phone number is {{user_number}}.",
-        "anchor_context": "Opening section, immediately after role definition",
-        "new_content": "",
-        "assertion": "The prompt contains a dedicated trailing section titled 'Per-Call Context' or similar that lists {{current_time_America/New_York}} and {{user_number}} as the last variable block before any greeting or greeting-trigger instruction. All static content (provider schedules, locations, insurance, appointment types, policies) appears before this trailing block.",
-        "behavioral_probe": "N/A \u2014 verified structurally via assertion on prompt organization.",
-        "lessons_applied": []
-      },
-      {
-        "issue_id": "TOOL-04",
-        "dimension": "principles",
-        "root_cause": "The get_available_slots tool schema requires start_date in 'DD-MM-YYYY format', but the prompt uses conversational date phrasing ('Monday June 5th', 'June eighth') and provides no instruction to convert spoken/written dates to the required format before calling the tool.",
-        "impact_if_unfixed": "Agent constructs invalid get_available_slots calls with malformed start_date (e.g. '05-06-2026' instead of '05-06-2026' or 'June 5th' instead of '05-06-2026'), causing tool failure and silent slot-search collapse.",
-        "fix_type": "insert_after",
-        "fix_description": "Add an explicit instruction immediately after the 'Now you need to find available times' paragraph that states: 'Always convert the patient's requested date to DD-MM-YYYY format before calling get_available_slots.' This ensures the agent reformats dates like 'Monday June 5th' to '05-06-2026' (or the correct DD-MM-YYYY mapping for that date).",
-        "anchor_text": "Now you need to find available times. Use get_available_slots to search for openings.",
-        "anchor_context": "Scheduling section, slot-search instruction",
-        "new_content": "Always convert the patient's requested date to DD-MM-YYYY format (for example, if they say 'Monday, June fifth', convert it to '05-06-2026') before calling get_available_slots. If the patient has not specified a date, ask them what day or time range works best and then convert to DD-MM-YYYY.",
-        "assertion": "The prompt explicitly instructs the agent to convert conversational dates to DD-MM-YYYY format before calling get_available_slots, with a concrete example showing the conversion.",
-        "behavioral_probe": "You have verified the patient (John Smith, DOB 1975-06-12, patient_id P-5678). He requests a follow-up visit with his usual provider, Dr. Torres, in-person. He says: 'I'd like to come in sometime next Wednesday afternoon if possible.' Today's date is 2026-04-14 (so next Wednesday is 2026-04-22). You are about to call get_available_slots. What value do you pass for the start_date parameter, and show the exact format you use?",
-        "lessons_applied": [
-          "LSN-003"
-        ]
-      },
-      {
-        "issue_id": "TOOL-03",
-        "dimension": "principles",
-        "root_cause": "The get_available_slots tool requires provider_id, location_id, appointment_type, and start_date (all mandatory per schema). The prompt instructs the agent to gather appointment type and modality preference but never explicitly lists the minimum information that must be collected before the first slot search.",
-        "impact_if_unfixed": "Agent may call get_available_slots without having collected a provider, location, or appointment type, causing silent failure or returning irrelevant results.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert a bulleted checklist immediately before 'Now you need to find available times' that explicitly states: 'Before calling get_available_slots, you must have collected: (1) appointment type; (2) provider ID or provider name; (3) location preference (or the provider's primary location); (4) in-person or telehealth. If any of these is missing, ask the patient before proceeding to slot search.'",
-        "anchor_text": "Ok so once you have verified the patient, ask them what they need the appointment for.",
-        "anchor_context": "Scheduling section, after patient verification",
-        "new_content": "Before calling get_available_slots, ensure you have collected all of the following:\n- Appointment type (new patient, follow-up, physical, sick visit, telehealth, procedure, lab review, prenatal, well-child, or urgent)\n- Provider name or ID (or confirm their usual provider)\n- Location preference (Main Office, West Hartford, or Glastonbury)\n- Modality preference (in-person or telehealth)\nIf any of these is missing, ask the patient before proceeding to search for available slots.",
-        "assertion": "The prompt contains an explicit bulleted or numbered checklist that specifies the four mandatory pieces of information (appointment type, provider, location, modality) the agent must gather before calling get_available_slots, with an instruction to ask if any are missing.",
-        "behavioral_probe": "You have verified the patient (Maria Garcia, DOB 1990-03-22, patient_id P-9012). She says: 'I need to schedule something soon, but I'm not sure what.' You ask 'What do you need the appointment for?' and she says 'A checkup.' You ask if she means an annual physical or a follow-up; she says 'A follow-up.' You ask if she wants in-person or telehealth; she says 'In-person is better.' You ask which provider she prefers, and she says 'I usually see Dr. Chen.' At this point, what information (if any) are you still missing before you call get_available_slots, and what is your next question to the patient?",
-        "lessons_applied": [
-          "LSN-003"
-        ]
-      },
-      {
-        "issue_id": "TOOL-06",
-        "dimension": "principles",
-        "root_cause": "The prompt instructs 'If after 3 searches they still have not found a time they like, offer to put them on a waitlist' but does NOT explicitly address the case where get_available_slots returns zero slots (provider fully booked). The agent has no instruction for this programmatic failure scenario.",
-        "impact_if_unfixed": "Agent receives empty slot array and does not know whether to (a) repeat the search, (b) try a different provider, (c) check a different date range, or (d) offer waitlist. Silent confusion and call abandonment.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit instruction immediately after the 'If there are no available slots' paragraph that states: 'If get_available_slots returns no slots (empty list), this means that provider is fully booked for the requested date range. Immediately tell the patient \"Unfortunately, [provider name] has no availability during that time.\" Then offer alternatives: (1) a different provider with availability; (2) a different date range; (3) adding them to a waitlist for their preferred provider.'",
-        "anchor_text": "If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives.",
-        "anchor_context": "Scheduling section, slot-availability guidance",
-        "new_content": "If get_available_slots returns no slots (an empty list), the provider is fully booked. Say to the patient: \"Unfortunately, [provider name] does not have any availability [during that time range / in the next 30 days]. Would you like me to check another provider, try a different date range, or add you to the waitlist for [provider name]?\"",
-        "assertion": "The prompt explicitly instructs the agent how to handle an empty-array response from get_available_slots, including the exact speech phrasing and three alternative options to present to the patient.",
-        "behavioral_probe": "You have verified the patient. She wants to schedule a follow-up with Dr. Patel, in-person, starting 2026-04-20. You call get_available_slots(provider_id='patel', location_id='main', appointment_type='follow_up', start_date='20-04-2026', modality='in_person') and receive an empty array (no slots available). What do you say to the patient, and what are the next options you offer?",
-        "lessons_applied": [
-          "LSN-003"
-        ]
-      },
-      {
-        "issue_id": "ELIG-01",
-        "dimension": "principles",
-        "root_cause": "Eligibility constraints (age restrictions, referral requirements, new-patient rules, visit-type incompatibilities) are scattered throughout provider and appointment-type definitions. There is no single unified instruction to validate eligibility before calling get_available_slots.",
-        "impact_if_unfixed": "Agent calls get_available_slots for an ineligible combination (e.g. Dr. Torres + patient age 3, or Dr. Kim new-patient without referral), wastes a tool call, then must backtrack and explain the restriction to the patient.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert a new subsection titled 'Eligibility Validation Before Slot Search' immediately before 'Now you need to find available times' that consolidates key restrictions and instructs the agent to validate them. List: age restrictions (Dr. Torres 5+, Dr. Kim pediatrics only, Dr. Kim <18 only); referral requirements (Dr. Kim new-patients, Dr. Foster new-patients, Dr. Wright all patients); visit-type restrictions (Dr. Chen no new-patient physicals, NP Nguyen no physicals/new-patients/procedures, Dr. Wright no general sick visits, PA Davis urgent only, etc.). Include: 'Before calling get_available_slots, check if the patient meets all eligibility rules for the requested provider and visit type. If not, explain the restriction and offer the nearest alternative.'",
-        "anchor_text": "If they do not have a provider preference, suggest an appropriate provider based on the appointment type.",
-        "anchor_context": "Scheduling section, provider-suggestion guidance",
-        "new_content": "Before suggesting a provider or calling get_available_slots, validate the patient's eligibility for that provider and visit type:\n- Age restrictions: Dr. Torres sees ages 5+; Dr. Kim sees ages <18 only; Dr. Michael Torres cannot see patients under 5 (refer to Dr. Kim).\n- Referral requirements: Dr. Kim (pediatrics) and Dr. Foster (OB/GYN) require a referral from the patient's PCP or pediatrician for new-patient visits.\n- Visit-type restrictions: Dr. Chen does not accept new-patient annual physicals; NP Nguyen does not do physicals, new-patient visits, or procedures; Dr. Wright does only procedures and orthopedic follow-ups; PA Davis does urgent visits only; Dr. Foster does only prenatal, well-woman, and GYN procedures (not general sick visits).\n- Maternity leave: Dr. Patel is on leave from March 15 through June 1, 2026. Do not offer her during that period.\nIf the patient is ineligible, explain the restriction clearly (e.g., 'I see your child is 3 years old. Dr. Torres sees children 5 and up. Dr. Kim specializes in pediatrics and would be a better fit.') and offer the alternative provider or next-best option.",
-        "assertion": "The prompt contains a consolidated eligibility-validation section that lists key age, referral, visit-type, and leave restrictions before the 'Now you need to find available times' instruction, with an explicit directive to check eligibility before slot search and explain restrictions if ineligible.",
-        "behavioral_probe": "You have verified the patient (Sarah Chen, DOB 2023-10-05, patient_id P-3456). Her mother calls and says: 'I'd like to schedule an annual checkup for Sarah with Dr. Torres.' Sarah is 2 years old. Before you call get_available_slots, what do you tell the mother, and what alternative do you offer?",
-        "lessons_applied": [
-          "LSN-003"
-        ]
-      },
-      {
-        "issue_id": "CONTENT-01",
-        "dimension": "principles",
-        "root_cause": "The prompt instructs send_sms to send a confirmation but does not specify that the SMS body MUST include the 5-Ws: provider, date, time, location, visit type. The send_sms tool accepts message_type but the prompt contains no requirement linking message_type to a structured body.",
-        "impact_if_unfixed": "Patients receive SMS like 'Your appointment is confirmed' with no identifiable details (provider, date, time, location), forcing them to call back to confirm which appointment.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit instruction immediately after the 'After booking, say' paragraph that mandates: 'When sending the SMS confirmation, the message body MUST include: (1) provider name; (2) appointment date; (3) appointment time; (4) location; (5) visit type. Example: \"Your appointment with Dr. Torres is confirmed for Monday, June 5th at 10:00 AM at our Main Office for a follow-up visit. Please arrive 10 minutes early.\" Use send_sms with message_type=\"appointment_booked\".'",
-        "anchor_text": "After booking, say \"Your appointment has been booked. You will receive a text message with the details.\" Then use send_sms to send them a confirmation.",
-        "anchor_context": "Scheduling section, post-booking confirmation",
-        "new_content": "When sending the SMS confirmation using send_sms, the message body MUST include all five key details: (1) provider name; (2) appointment date (day of week, month, date); (3) appointment time; (4) location (Main Office, West Hartford, or Glastonbury); (5) visit type. Example: 'Your appointment with Dr. Torres is confirmed for Monday, June 5th at 10:00 AM at our Main Office for a follow-up visit. Please arrive 10 minutes early.' Always use message_type=\"appointment_booked\".",
-        "assertion": "The prompt explicitly requires that the SMS confirmation body include provider name, date, time, location, and visit type, with a concrete example of the required format.",
-        "behavioral_probe": "You have booked an appointment for the patient (David Martinez, patient_id P-7890) with Dr. Chen on Thursday, April 25th at 2:00 PM at the Main Office for a follow-up visit. You are about to call send_sms. What exact information do you include in the message body, and what message_type parameter do you pass?",
-        "lessons_applied": [
-          "LSN-003"
-        ]
-      },
-      {
-        "issue_id": "SAFE-02",
-        "dimension": "principles",
-        "root_cause": "For cancel_appointment, the prompt instructs verbal confirmation but does not explicitly require identity re-verification immediately before the cancellation call. If many turns elapse between initial verification and cancellation, the agent may cancel without a fresh identity check.",
-        "impact_if_unfixed": "Agent cancels the wrong appointment if caller identity changes or caller becomes confused during the call; no authentication gate immediately before the irreversible action.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit instruction immediately before 'Then say \"Just to confirm\"' that states: 'Before canceling, re-verify the caller's identity by asking for their date of birth again, then read back the appointment details (provider, date, time, location) and wait for explicit \"yes\" confirmation. Then call cancel_appointment.'",
-        "anchor_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel your",
-        "anchor_context": "Cancellation section, pre-cancellation confirmation",
-        "new_content": "Confirm which appointment they mean. Re-verify identity by asking 'Can you confirm your date of birth?' Then read back the full appointment details: 'Just to confirm, you would like to cancel your [appointment type] with [provider name] on [day], [month] [date] at [time] at [location]. Is that correct?'",
-        "assertion": "The prompt explicitly instructs the agent to re-verify the caller's date of birth immediately before calling cancel_appointment, after the read-back confirmation.",
-        "behavioral_probe": "You are processing a cancellation. You verified the patient 15 minutes ago (James Wilson, DOB 1980-07-14, patient_id P-4321). You found his appointment with Dr. Foster on June 10th at 3:00 PM at West Hartford. You have asked him to confirm, and he said 'yes'. Before you call cancel_appointment, what identity information do you re-verify from him, and in what order?",
-        "lessons_applied": []
-      },
-      {
         "issue_id": "WA-01",
         "dimension": "workflow_adherence",
-        "root_cause": "The get_available_slots tool requires provider_id and location_id as mandatory string parameters, but the prompt defines providers and locations by name only (e.g., 'Dr. Sarah Chen', 'Main Office'). There is no mapping table or registry mapping names to IDs.",
-        "impact_if_unfixed": "Agent cannot construct valid get_available_slots calls; there is no way to convert 'Dr. Chen' to a provider_id string. Tool calls fail silently or with 'invalid provider_id' errors.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert a new section immediately after the locations and providers definitions titled 'Provider and Location ID Reference' with two tables: one mapping provider names to IDs (e.g., 'Dr. Sarah Chen -> PROV-CHEN-001'), and one mapping location names to IDs (e.g., 'Main Office -> LOC-MAIN-001'). Use consistent placeholder ID formats. Instruct the agent: 'When calling get_available_slots, use the provider ID and location ID from the tables below.'",
-        "anchor_text": "- Dr. James Wright, Orthopedics. Monday Wednesday at Main Office only.",
-        "anchor_context": "Provider definitions section, end of provider list",
-        "new_content": "\n## Provider and Location ID Reference\n\n**Provider IDs:**\n- Dr. Sarah Chen -> PROV-CHEN-001\n- Dr. Michael Torres -> PROV-TORRES-001\n- Dr. Priya Patel -> PROV-PATEL-001\n- NP Jessica Nguyen -> PROV-NGUYEN-001\n- Dr. Robert Kim -> PROV-KIM-001\n- Dr. Amanda Foster -> PROV-FOSTER-001\n- Dr. James Wright -> PROV-WRIGHT-001\n- PA Marcus Davis -> PROV-DAVIS-001\n\n**Location IDs:**\n- Main Office -> LOC-MAIN-001\n- West Hartford Branch -> LOC-WESTHARTFORD-001\n- Glastonbury Office -> LOC-GLASTONBURY-001\n\nWhen calling get_available_slots, use the provider_id and location_id from these tables. For example, if the patient wants to see Dr. Torres at the Main Office, use provider_id=\"PROV-TORRES-001\" and location_id=\"LOC-MAIN-001\".",
-        "assertion": "The prompt contains a dedicated 'Provider and Location ID Reference' section with explicit mappings from provider names to provider_ids (e.g., 'Dr. Sarah Chen -> PROV-CHEN-001') and from location names to location_ids, with an instruction to use these IDs in get_available_slots calls.",
-        "behavioral_probe": "The patient has requested a follow-up visit with Dr. Torres at the Main Office. You are about to call get_available_slots. What exact values do you pass for provider_id and location_id, including the full ID strings?",
-        "lessons_applied": []
-      },
-      {
-        "issue_id": "WA-02",
-        "dimension": "workflow_adherence",
-        "root_cause": "The reschedule flow instructs 'Cancel the old appointment first using cancel_appointment. Then schedule a new appointment.' If cancel succeeds but the new booking fails (no slots found, patient changes mind), the old appointment is destroyed with no rollback.",
-        "impact_if_unfixed": "Patient loses their original appointment and has no fallback. Cancellation fee may apply and patient must start over from scratch.",
+        "root_cause": "The rescheduling flow instructs the agent to call cancel_appointment before searching for a new slot, so if no new slot is available the patient is left with no appointment and no rollback path.",
+        "impact_if_unfixed": "A patient asking to reschedule could have their existing appointment destroyed and then be told no new slots are available, leaving them with nothing booked and no way to restore the original appointment.",
         "fix_type": "replace",
-        "fix_description": "Replace the reschedule instruction to explicitly specify a pre-cancel check and rollback logic: 'First, ask the patient when they would like to come in. Use get_available_slots to find openings and confirm a new slot with them. Only after they confirm a new slot are you satisfied should you cancel the old appointment using cancel_appointment. Then immediately book the new appointment. If the new booking fails for any reason, tell the patient we will keep their original appointment and offer to try again or speak with the front desk.'",
-        "anchor_text": "Cancel the old appointment first using cancel_appointment. Then schedule a new appointment. Ask when they would like to come in.",
-        "anchor_context": "Rescheduling section",
-        "new_content": "To reschedule safely, always confirm the new appointment BEFORE canceling the old one: (1) Ask when they would like to come in and search for available slots using get_available_slots. (2) Offer them two time options and wait for explicit confirmation. (3) Once they confirm the new slot, cancel the old appointment using cancel_appointment. (4) Then immediately book the new appointment using book_appointment. If the new booking fails at any point, say 'I apologize \u2014 let me keep your original appointment. We can try rescheduling again or speak with our front desk team.' Do not leave the patient without an appointment.",
-        "assertion": "The prompt explicitly instructs the agent to confirm the new appointment slot BEFORE canceling the old one, with a step-by-step numbered sequence that ensures the old appointment is not destroyed if the new booking fails.",
-        "behavioral_probe": "The patient is rescheduling. Her original appointment is with Dr. Chen on June 8th at 2:00 PM. She says she'd like to reschedule to June 15th instead. You search for slots with Dr. Chen on June 15th and find two options: 10:00 AM and 3:00 PM. Before you call cancel_appointment on the June 8th slot, describe the exact state you are in: do you have confirmation of the new slot, and what confirmation have you received from the patient?",
+        "fix_description": "Reverse the order so the agent searches for and confirms a new slot before cancelling the old one, and adds an explicit instruction that the old appointment must not be cancelled until the new one is successfully booked.",
+        "anchor_text": "Cancel the old appointment first using cancel_appointment",
+        "anchor_context": "For rescheduling appointments section",
+        "new_content": "Search for the new appointment first. Ask when they would like to come in. Use get_available_slots to find openings. Offer them two times. Once the patient has selected a new time, confirm the new slot details with them and ask for confirmation before making any changes. Only after the patient confirms the new slot should you proceed. Use book_appointment to secure the new slot first. Then, once book_appointment returns a successful result, use cancel_appointment on the old appointment. If book_appointment fails or no suitable slot is found, do not cancel the old appointment \u2014 inform the patient and offer to transfer them to the front desk to complete the reschedule manually. The same cancellation policy applies \u2014 if the old appointment is within 24 hours, inform them of the possible fee at the time of cancellation.",
+        "assertion": "The rescheduling section instructs the agent to call book_appointment to secure the new slot before calling cancel_appointment on the old appointment, and explicitly states not to cancel the old appointment if no new slot is found or if book_appointment fails.",
+        "behavioral_probe": "You have verified the patient (John Smith, DOB 1972-08-20, patient_id P-5678). He wants to reschedule his follow-up with Dr. Torres currently booked for tomorrow at 2 PM (appointment_id APT-999). He says 'I want to move it to next Thursday.' You call get_available_slots and find one slot: next Thursday at 11 AM with Dr. Torres at Main Office (slot_id SLT-042). The patient says 'yes, that works.' What is the exact sequence of your next two tool calls, and which appointment_id or slot_id does each one use?",
         "lessons_applied": [
           "LSN-005"
         ]
       },
       {
+        "issue_id": "WA-02",
+        "dimension": "workflow_adherence",
+        "root_cause": "The get_available_slots tool schema requires start_date in DD-MM-YYYY format, but the prompt never specifies this format. Dates are referenced verbally throughout the prompt, so the agent will pass an incorrect format string on every slot search.",
+        "impact_if_unfixed": "Every call to get_available_slots will pass a malformed start_date parameter, causing silent failures or wrong results on all scheduling, rescheduling, and availability-check flows.",
+        "fix_type": "insert_after",
+        "fix_description": "Add an explicit format instruction immediately after the sentence that introduces get_available_slots, specifying that start_date must be passed in DD-MM-YYYY format.",
+        "anchor_text": "Use get_available_slots to search for openings. Give them two options.",
+        "anchor_context": "For scheduling appointments section \u2014 slot search instructions",
+        "new_content": "When calling get_available_slots, always pass start_date in DD-MM-YYYY format (for example, June 5th 2026 becomes 05-06-2026). Never pass a verbal date string or ISO format (YYYY-MM-DD) as the start_date parameter.",
+        "assertion": "The prompt explicitly instructs the agent to format start_date as DD-MM-YYYY (e.g. 05-06-2026) when calling get_available_slots, and explicitly prohibits verbal date strings and ISO format.",
+        "behavioral_probe": "You have verified the patient (Maria Lopez, DOB 1990-03-22, patient_id P-2233). She wants a sick visit with PA Davis as soon as possible. Today's date returned by current_time is 2026-06-10 (ISO format). You are about to call get_available_slots. What exact value do you pass for the start_date parameter?",
+        "lessons_applied": [
+          "LSN-003"
+        ]
+      },
+      {
         "issue_id": "WA-03",
         "dimension": "workflow_adherence",
-        "root_cause": "The prompt states Dr. Patel is on maternity leave from March 15 through June 1, 2026, but provides no instruction to check the current date ({{current_time_America/New_York}}) against this range before offering Dr. Patel as an alternative.",
-        "impact_if_unfixed": "If today is between 3/15 and 6/1, the agent may offer Dr. Patel as an alternative even though she is unavailable. Patient is disappointed when they learn the offer is not valid.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit conditional instruction immediately after the alternatives-offering paragraph that states: 'Before offering Dr. Patel as an alternative, check the current date. If today is between March 15, 2026 and June 1, 2026, Dr. Patel is on maternity leave. Do NOT offer her. Instead, offer Dr. Chen as the alternative, and optionally offer to add the patient to the waitlist for Dr. Patel after June 1, 2026.'",
-        "anchor_text": "If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives. Say \"Dr. Chen does not have any openings in the next month. Would you like to try Dr. Patel instead, or would you prefer to be added to the waitlist for Dr. Chen?\" But remember Dr. Patel is on leave from March 15 through June 1 2026 so do not offer her during that time.",
-        "anchor_context": "Scheduling section, alternatives guidance",
-        "new_content": "If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives. IMPORTANT: Before offering Dr. Patel, check the current date. If today is between March 15, 2026 and June 1, 2026 (inclusive), Dr. Patel is on maternity leave and is NOT available. In that case, offer Dr. Chen instead: \"Dr. Patel is unavailable right now due to maternity leave, but Dr. Chen is another excellent choice and may have availability. Would you like to try Dr. Chen instead, or would you prefer to be added to the waitlist for Dr. Patel after June 1st?\" Outside the leave period, you may offer Dr. Patel normally.",
-        "assertion": "The prompt explicitly instructs the agent to check the current date against the March 15 \u2013 June 1, 2026 maternity leave window and conditionally prevent offering Dr. Patel during that period, with explicit alternative speech phrasing.",
-        "behavioral_probe": "Today is April 10, 2026. A patient requests Dr. Patel for a follow-up visit but there are no available slots with Dr. Patel for the next 30 days. What alternative do you offer the patient, and do you mention Dr. Patel by name?",
-        "lessons_applied": []
+        "root_cause": "The prompt instructs the agent to 'offer to put them on a waitlist' and 'make a note' in two separate places, but no tool in the catalog supports creating a waitlist entry or storing a preference note. The agent cannot execute this instruction.",
+        "impact_if_unfixed": "The agent will either fabricate a waitlist confirmation (telling the patient they have been added when nothing was recorded) or stall, both of which erode patient trust and create operational gaps.",
+        "fix_type": "replace",
+        "fix_description": "Replace the waitlist instruction with a transfer-to-front-desk fallback that the agent can actually execute, removing the reference to a non-existent capability.",
+        "anchor_text": "offer to put them on a waitlist \u2014 take their preferred provider, date range, and time of day preference and make a note.",
+        "anchor_context": "For scheduling appointments section \u2014 slot search fallback after 3 searches",
+        "new_content": "let them know you were unable to find a matching time and offer to transfer them to the front desk, who can manually add them to a waitlist. Say something like \"I was not able to find a time that works for you. I can transfer you to our front desk team who will add you to the waitlist for [Provider]. Would you like me to do that?\" Then use transfer_call with destination front_desk and include the preferred provider, date range, and time of day in the reason field.",
+        "assertion": "The scheduling fallback after 3 failed searches instructs the agent to transfer to front_desk using transfer_call rather than attempting to create a waitlist entry directly, and specifies passing the patient's preferences in the reason field.",
+        "behavioral_probe": "You have verified the patient (Susan Park, DOB 1965-11-04, patient_id P-3344). She wants a follow-up with Dr. Chen. You have called get_available_slots three times with different start dates and she has declined all six offered slots. She says 'I just cannot find a time that works.' What do you say next and what tool do you call?",
+        "lessons_applied": [
+          "LSN-006",
+          "LSN-010"
+        ]
       },
       {
         "issue_id": "WA-04",
         "dimension": "workflow_adherence",
-        "root_cause": "The prompt states: 'If a patient has not been seen in over 3 years, they need to be scheduled as a new patient even if they are already in the system.' But the agent has no instruction to check the last_visit_date field returned by find_patient and compare it to today's date to enforce this rule.",
-        "impact_if_unfixed": "Agent schedules a returning patient as a follow-up when they should be scheduled as a new_patient_visit (60 min vs. 30 min, requires photo ID/insurance at check-in, etc.). Patient arrives unprepared; appointment type mismatch causes workflow problems.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit instruction immediately after the patient-verification step (after 'Use find_patient to look them up') that states: 'Check the last_visit_date returned by find_patient. If last_visit_date is more than 3 years ago (or is null/empty, indicating no prior visits), treat this patient as a NEW patient for scheduling purposes, even if they are already in the system. Use appointment_type=\"new_patient\" and remind them to bring photo ID and insurance card.'",
-        "anchor_text": "If you find one match, great, move on.",
-        "anchor_context": "Scheduling section, patient verification",
-        "new_content": "If you find one match, check their last_visit_date from the find_patient result. If last_visit_date is more than 3 years in the past (or is null/empty), treat them as a NEW patient for this visit, even if they exist in the system. Ask 'I see you have been here before, but it has been more than 3 years. Let me schedule you as a new patient visit to get all your information updated. You will need to bring a photo ID and insurance card to check-in. Is that okay?'",
-        "assertion": "The prompt explicitly instructs the agent to inspect the last_visit_date field from find_patient and enforce the 3-year rule before offering appointment times, with explicit speech phrasing for the new-patient re-classification.",
-        "behavioral_probe": "You call find_patient for Robert Johnson (DOB 1965-12-03) and receive a match with last_visit_date: 2020-11-15. Today is 2026-04-14. The patient says he wants a follow-up visit. What appointment_type do you use when searching for available slots, and what do you tell the patient about the required check-in documents?",
+        "root_cause": "The send_sms instruction after booking does not tell the agent to pass the appointment_id returned by book_appointment, so the SMS is sent without appointment details even though the schema supports them via the appointment_id field.",
+        "impact_if_unfixed": "Patients are told 'you will receive a text with the details' but the SMS arrives without date, time, provider, or location, forcing a callback and eroding trust in the confirmation flow.",
+        "fix_type": "replace",
+        "fix_description": "Update the post-booking send_sms instruction to explicitly require passing the appointment_id returned by book_appointment.",
+        "anchor_text": "Then use send_sms to send them a confirmation. Tell them to arrive 10 minutes early.",
+        "anchor_context": "For scheduling appointments section \u2014 post-booking instructions",
+        "new_content": "Then use send_sms with message_type appointment_booked and the appointment_id returned by book_appointment, so the message includes the full appointment details. Tell them to arrive 10 minutes early.",
+        "assertion": "The post-booking instruction explicitly requires the agent to pass the appointment_id returned by book_appointment when calling send_sms, using message_type appointment_booked.",
+        "behavioral_probe": "You have just called book_appointment for patient P-4455 and it returned appointment_id APT-2024. You are now about to call send_sms. What exact parameters do you pass to send_sms?",
         "lessons_applied": [
-          "LSN-004"
+          "LSN-003"
         ]
       },
       {
         "issue_id": "WA-05",
         "dimension": "workflow_adherence",
-        "root_cause": "The prompt states: 'Lab review appointments have to be with the doctor who ordered the labs. If they say \"I want to review my bloodwork with Dr. Torres\" but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.' No tool is available to query which provider ordered the labs.",
-        "impact_if_unfixed": "Agent cannot enforce the ordering-provider rule. Patient is scheduled with the wrong provider for a lab review. Provider wastes time reviewing labs outside their scope.",
+        "root_cause": "The prompt provides no instruction for what the agent should do when get_available_slots, book_appointment, or cancel_appointment returns a tool error or unexpected empty response on the first call. There is no error-handling fallback for any state-changing tool.",
+        "impact_if_unfixed": "A tool failure during booking or cancellation will cause the agent to either silently retry, fabricate success, or stall with no recovery path, potentially leaving the patient's schedule in an unknown state.",
         "fix_type": "insert_after",
-        "fix_description": "Insert a note immediately after the lab-review rule that states: 'Note: To enforce this rule, when a patient requests a lab review, ask \"Do you remember which doctor ordered those labs?\" Based on their answer, confirm it is the provider they want to see. If they name a different provider, explain: \"Lab reviews must be with the provider who ordered the tests. Let me schedule you with [ordering provider name] instead.\" If you are unsure who ordered the labs, transfer to the nurse line to verify.'",
-        "anchor_text": "Lab review appointments have to be with the doctor who ordered the labs. If they say \"I want to review my bloodwork with Dr. Torres\" but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.",
-        "anchor_context": "Scheduling section, remember important rules",
-        "new_content": "When scheduling a lab review, always ask the patient: 'Do you remember which doctor ordered those labs?' Match the patient's answer to the correct provider. If they request a different provider than the one who ordered the labs, explain: 'Lab reviews must be with the doctor who ordered the tests. Let me schedule you with [ordering provider name] instead.' If you cannot determine the ordering provider from the patient's answer, say 'Let me find out which doctor ordered your labs' and transfer to nurse_line.",
-        "assertion": "The prompt provides explicit instructions on how to determine the ordering provider (by asking the patient) and what to do if the patient requests a different provider, with example speech phrasing for the correction.",
-        "behavioral_probe": "The patient says: 'I need to review my bloodwork results. I want to see Dr. Torres.' You do not have information on which provider ordered the labs. What is the first question you ask the patient, and if they are not sure, what do you do next?",
-        "lessons_applied": []
+        "fix_description": "Insert a dedicated tool-failure handling paragraph after the post-booking send_sms instruction that covers get_available_slots, book_appointment, and cancel_appointment errors.",
+        "anchor_text": "If it is an annual physical, remind them to fast for 12 hours if they want labs drawn at the visit.",
+        "anchor_context": "For scheduling appointments section \u2014 end of post-booking instructions",
+        "new_content": "If any tool returns an error or an unexpected result: if get_available_slots returns an error, say \"I am having trouble retrieving available times right now\" and offer to transfer to the front desk or try again in a moment. If book_appointment returns an error, say \"I was not able to complete the booking \u2014 the slot may no longer be available\" and offer two alternatives: search for another slot or transfer to the front desk. Do not tell the patient the appointment is booked unless book_appointment returns a successful result. If cancel_appointment returns an error, say \"I was not able to process the cancellation\" and transfer to the front desk immediately \u2014 do not assume the appointment was cancelled.",
+        "assertion": "The prompt includes explicit error-handling instructions for get_available_slots, book_appointment, and cancel_appointment failures, specifying what to say to the patient and offering transfer to front_desk as a fallback for each.",
+        "behavioral_probe": "You have verified the patient (David Lee, DOB 1983-07-14, patient_id P-6677). He selected a follow-up slot with Dr. Patel on June 18th (slot_id SLT-099). You called book_appointment with the correct parameters and it returned an error: 'slot_unavailable'. The patient is waiting. What do you say to him and what is your next action?",
+        "lessons_applied": [
+          "LSN-005"
+        ]
       },
       {
         "issue_id": "WA-06",
         "dimension": "workflow_adherence",
-        "root_cause": "The prompt instructs: 'Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know and ask if they want to cancel one or speak with the front desk.' But the prompt does not explicitly instruct the agent to call find_appointment to check the count before offering new slots.",
-        "impact_if_unfixed": "Agent skips the 3-appointment check entirely and books a fourth appointment, violating the policy. Patient accumulates excess appointments.",
+        "root_cause": "Eligibility rules are scattered across provider and appointment-type sections with no explicit gate in the scheduling flow requiring the agent to check all applicable restrictions before calling get_available_slots, so the agent can offer and book ineligible slots.",
+        "impact_if_unfixed": "The agent could offer a slot that violates a provider or visit-type restriction (e.g. annual physical with Dr. Chen for a new patient, telehealth for a procedure, Dr. Wright without referral), book it, and the patient would only discover the problem at check-in.",
         "fix_type": "insert_after",
-        "fix_description": "Insert an explicit instruction immediately after the scheduling opening (after patient verification) that states: 'After verifying the patient's identity, call find_appointment(patient_id, status=\"scheduled\") to retrieve all upcoming scheduled appointments. Count them. If the patient already has 3 or more upcoming appointments, say: \"I see you have [X] upcoming appointments. Our system allows up to 3 at a time. Would you like to cancel one of these appointments, or would you prefer to speak with our front desk team about your needs?\" Only proceed to search for new slots if they have fewer than 3 upcoming appointments.'",
-        "anchor_text": "Ok so once you have verified the patient, ask them what they need the appointment for.",
-        "anchor_context": "Scheduling section, after identity verification",
-        "new_content": "After verifying the patient's identity, immediately call find_appointment(status=\"scheduled\") to check how many upcoming appointments they already have. If they have 3 or more, say: 'I see you have [X] upcoming appointments scheduled. Our system allows up to 3 at a time. Would you like to cancel one of these, or would you prefer to speak with our front desk team?' Only proceed to ask about the new appointment if they have fewer than 3 scheduled.",
-        "assertion": "The prompt explicitly instructs the agent to call find_appointment(status=\"scheduled\") immediately after identity verification and check the count before proceeding to schedule a new appointment, with specific speech phrasing for the 3+ case.",
-        "behavioral_probe": "You have verified the patient (Linda Wong, patient_id P-5555). You call find_appointment(patient_id='P-5555', status='scheduled') and receive 3 results: appointments on June 5, June 12, and June 20. The patient now says: 'I'd like to add one more appointment for my annual physical.' What do you tell her, and what options do you offer?",
-        "lessons_applied": []
+        "fix_description": "Insert an explicit eligibility pre-check gate between gathering appointment details and calling get_available_slots, listing the categories of restrictions that must be verified before the slot search.",
+        "anchor_text": "Also ask if they want in-person or telehealth.",
+        "anchor_context": "For scheduling appointments section \u2014 post-verification flow, after gathering appointment details",
+        "new_content": "Before calling get_available_slots, verify ALL of the following that apply to this request: (1) Provider restrictions \u2014 confirm the requested provider sees the requested visit type, is available at the requested location on their scheduled days, and is not on leave. (2) Age restrictions \u2014 Dr. Torres does not see patients under 5; Dr. Kim and Dr. Foster only see patients within their specialty age and sex criteria. (3) Visit-type restrictions \u2014 confirm the visit type is available in the requested modality (telehealth is not available for physicals, procedures, new patient visits, well-child checks, or urgent visits). (4) Referral requirements \u2014 Dr. Kim new patients, Dr. Foster new patients, and Dr. Wright new patients all require a referral before booking. (5) Advance-booking rules \u2014 annual physicals must be booked at least 2 weeks out; urgent visits are same-day only. If any restriction is violated, inform the patient with a plain one-sentence explanation and offer the nearest valid alternative before searching for slots.",
+        "assertion": "The scheduling flow includes an explicit eligibility pre-check block before get_available_slots, listing provider restrictions, age restrictions, visit-type/modality restrictions, referral requirements, and advance-booking rules as mandatory gates.",
+        "behavioral_probe": "You have verified the patient (Linda Chen, DOB 1945-02-28, patient_id P-7788). She says she wants an annual physical with Dr. Sarah Chen and would prefer telehealth because she has trouble driving. You have gathered her appointment type (annual physical), preferred provider (Dr. Chen), and modality preference (telehealth). You have not yet called get_available_slots. What do you check before making that call, and what do you say to the patient?",
+        "lessons_applied": [
+          "LSN-004",
+          "LSN-001"
+        ]
       },
       {
         "issue_id": "WA-07",
         "dimension": "workflow_adherence",
-        "root_cause": "The prompt states: 'Annual physicals need to be booked at least 2 weeks out from today. If someone wants a physical next week, explain the policy and find a date at least 2 weeks away.' But there is no instruction to compare the requested start_date against today + 14 days before calling get_available_slots.",
-        "impact_if_unfixed": "Agent may call get_available_slots with a start_date less than 2 weeks away for an annual_physical, violating the booking window rule. Slot search proceeds with invalid parameters.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert a conditional check immediately before the 'Now you need to find available times' step that states: 'If the appointment type is annual_physical, check that the patient's requested start_date is at least 14 days in the future from today ({{current_time_America/New_York}}). If it is fewer than 14 days away, say: \"Annual physicals must be scheduled at least 2 weeks in advance. The earliest I can book you is [14 days from today].\" Then search for slots starting from 14 days in the future.'",
-        "anchor_text": "Now you need to find available times. Use get_available_slots to search for openings.",
-        "anchor_context": "Scheduling section, slot-search instruction",
-        "new_content": "If the appointment type is annual_physical, validate the scheduling window: the patient's requested start_date must be at least 14 days in the future from today. If they request a date sooner than 14 days, say: 'Annual physicals must be scheduled at least 2 weeks in advance. The earliest I can book you is [date 14 days from today]. Does that work for you?' If yes, adjust the start_date to 14 days from today and then search. If no, help them find an acceptable date that is at least 14 days away.",
-        "assertion": "The prompt explicitly instructs the agent to validate that annual_physical appointments are at least 14 days in the future, with comparison logic tied to the current_time variable, before calling get_available_slots.",
-        "behavioral_probe": "Today is April 14, 2026 ({{current_time_America/New_York}}). A patient requests an annual physical starting April 21, 2026. What do you tell the patient, and what start_date do you use if they agree to reschedule?",
+        "root_cause": "After book_appointment succeeds, the prompt tells the agent to say 'Your appointment has been booked' and immediately send an SMS, without requiring the agent to read back the confirmed provider, date, time, location, and visit type in speech. The pre-booking read-back happens before the tool call and does not substitute for a post-booking confirmation.",
+        "impact_if_unfixed": "If the slot details changed between the pre-booking read-back and the successful book_appointment response, or if any field was misheard, the error will not be caught before the call ends, leading to wrong appointments and downstream complaints.",
+        "fix_type": "replace",
+        "fix_description": "Replace the post-booking speech instruction to require the agent to read back all five key fields after book_appointment returns successfully, then send the SMS.",
+        "anchor_text": "After booking, say \"Your appointment has been booked. You will receive a text message with the details.\"",
+        "anchor_context": "For scheduling appointments section \u2014 post-booking instructions",
+        "new_content": "After book_appointment returns a successful result, confirm the details aloud: say \"Your appointment is confirmed. I have you scheduled for a [visit type] with [Provider] on [day, date] at [time] at our [location]. You will also receive a text message with these details.\" Then use send_sms with message_type appointment_booked and the appointment_id returned by book_appointment, so the message includes the full appointment details.",
+        "assertion": "The post-booking instruction requires the agent to read back all five key fields \u2014 visit type, provider, day, date, time, and location \u2014 in speech after book_appointment succeeds, before sending the SMS.",
+        "behavioral_probe": "You have just called book_appointment for patient P-8899 and it returned successfully with appointment_id APT-3055, confirming a follow-up with Dr. Torres on Monday June 22nd at 10 AM at the Main Office. The patient is still on the line. What is your next spoken utterance and what tool do you call immediately after?",
         "lessons_applied": [
-          "LSN-002"
+          "LSN-010"
         ]
       },
       {
-        "issue_id": "CONSIST-02",
-        "dimension": "principles",
-        "root_cause": "Two overlapping rules lack explicit precedence: (1) 'Patients can have up to 3 upcoming appointments at a time'; (2) 'For recurring appointments... you can only book one at a time.' If a patient with 2 appointments requests a 3-visit prenatal series, which rule takes precedence?",
-        "impact_if_unfixed": "Agent is confused when both rules apply; behavior is inconsistent call-to-call. Some runs may block the first prenatal booking due to the 3-appointment cap; others may allow it due to 'one at a time' applying to recurring series.",
-        "fix_type": "insert_after",
-        "fix_description": "Insert an explicit precedence statement immediately after the 3-appointment limit rule that states: 'When a patient requests a recurring series (e.g., prenatal visits, monthly follow-ups, physical therapy), the \"one at a time\" rule applies: you may only book the FIRST appointment in the series. Do not count upcoming appointments in the series toward the 3-appointment limit when booking the first visit. After they complete that visit, they can schedule the next one.'",
-        "anchor_text": "Patients can have up to 3 upcoming appointments at a time. If they already have 3, let them know and ask if they want to cancel one or speak with the front desk.",
-        "anchor_context": "Scheduling section, remember important rules",
-        "new_content": "For recurring appointment series (prenatal visits, monthly follow-ups, physical therapy), the \"one at a time\" rule takes precedence over the 3-appointment limit: you may only book the first appointment in the series. Do not count future appointments in the series against the patient's 3-appointment cap. After they complete each visit, they can schedule the next one through the office or patient portal.",
-        "assertion": "The prompt explicitly states that the 'one at a time' rule for recurring appointments takes precedence over the 3-appointment limit, with a clear explanation of how both rules coexist.",
-        "behavioral_probe": "A patient has 2 upcoming appointments. She is pregnant and wants to schedule her first prenatal visit with Dr. Foster (which will start a series of monthly visits). Does the 3-appointment limit block her from booking the first prenatal visit? What is your response to her request?",
+        "issue_id": "WA-08",
+        "dimension": "workflow_adherence",
+        "root_cause": "The scheduling flow bundles four questions (reason, appointment type, provider preference, modality) into a single instructional block, which causes the agent to ask multiple questions in one turn \u2014 a known voice anti-pattern.",
+        "impact_if_unfixed": "Voice callers will answer only the last question asked or become confused, forcing repeated clarification loops and extending call time.",
+        "fix_type": "replace",
+        "fix_description": "Replace the bundled question block with a sequenced one-question-at-a-time instruction.",
+        "anchor_text": "ask them what they need the appointment for. Ask them what kind of appointment they want. Ask if they have a preference for which doctor they want to see. Also ask if they want in-person or telehealth.",
+        "anchor_context": "For scheduling appointments section \u2014 post-verification flow",
+        "new_content": "Ask one question at a time. First, ask what brings them in today. Based on their answer, determine the appropriate appointment type \u2014 help them if they are unsure (see the appointment-type guidance below). Once the appointment type is clear, ask if they have a preference for a specific provider. Once provider preference is known, ask if they would like an in-person or telehealth visit (where applicable). Do not bundle these into a single turn.",
+        "assertion": "The scheduling flow instructs the agent to ask one question per turn in sequence \u2014 reason first, then appointment type, then provider preference, then modality \u2014 rather than bundling all four questions into a single turn.",
+        "behavioral_probe": "You have verified the patient (Tom Rivera, DOB 1978-05-05, patient_id P-9900) and determined he is an existing patient. He says 'I need to see a doctor.' You are now at the point of gathering appointment details. What is the single question you ask him next?",
+        "lessons_applied": [
+          "LSN-001"
+        ]
+      },
+      {
+        "issue_id": "WA-09",
+        "dimension": "workflow_adherence",
+        "root_cause": "The two per-call variable placeholders ({{current_time_America/New_York}} and {{user_number}}) are embedded in the third paragraph of the prompt, between the static locations block and the large static blocks covering providers, insurance, appointment types, and all tool guidance. This invalidates the cache at the third paragraph on every call.",
+        "impact_if_unfixed": "The entire provider roster, insurance list, appointment-type definitions, and tool instructions \u2014 the majority of the prompt \u2014 cannot be cached, increasing per-call latency and cost on every single call.",
+        "fix_type": "replace",
+        "fix_description": "Remove the variable placeholders from the third paragraph and note that they should be placed in a trailing context block at the end of the prompt after all static content.",
+        "anchor_text": "The current time is {{current_time_America/New_York}}. The caller's phone number is {{user_number}}.",
+        "anchor_context": "Third paragraph of the prompt, between location details and provider list",
+        "new_content": "[Move to end of prompt \u2014 see Call Context block below]",
+        "assertion": "The variable placeholders {{current_time_America/New_York}} and {{user_number}} are removed from the early static section of the prompt and relocated to a dedicated trailing context block after all static content, so that all static content above them is cacheable.",
+        "behavioral_probe": "N/A \u2014 verified structurally",
+        "lessons_applied": [
+          "LSN-003"
+        ]
+      },
+      {
+        "issue_id": "WA-10",
+        "dimension": "workflow_adherence",
+        "root_cause": "The cancellation confirmation paragraph uses sequential prose ('Confirm which appointment they mean. Then say... If they say yes, use cancel_appointment') which an agent could read as permission to proceed without waiting for explicit patient confirmation, since 'then' implies sequence rather than a mandatory gate.",
+        "impact_if_unfixed": "The agent might call cancel_appointment immediately after reading back the details without pausing for the patient's yes, resulting in an irreversible cancellation the patient did not explicitly authorize.",
+        "fix_type": "replace",
+        "fix_description": "Rewrite the cancellation gate to make the wait-for-affirmation step explicit and mandatory before cancel_appointment is called.",
+        "anchor_text": "Confirm which appointment they mean. Then say \"Just to confirm, you would like to cancel",
+        "anchor_context": "For canceling appointments section",
+        "new_content": "Confirm which appointment they mean. Then read it back: say \"Just to confirm, you would like to cancel your [visit type] with [Provider] on [day, date] at [time]. Is that correct?\" Stop and wait for the patient to say yes or no. Do not call cancel_appointment until you have received explicit verbal confirmation. If they say yes, then call cancel_appointment. If they say no or are unsure, ask them to clarify which appointment they want to cancel.",
+        "assertion": "The cancellation flow explicitly instructs the agent to stop and wait for explicit verbal confirmation before calling cancel_appointment, and states that cancel_appointment must not be called until the patient says yes.",
+        "behavioral_probe": "You have verified the patient (Karen White, DOB 1962-04-17, patient_id P-1122). She says she wants to cancel her appointment. find_appointment returned one upcoming appointment: a follow-up with Dr. Chen on Friday June 19th at 3 PM (appointment_id APT-4001). You have just read back the appointment details to her. She has not yet responded. What do you do next?",
         "lessons_applied": []
       }
     ]
   },
   "selected_issues": [
-    "STRUCT-01",
-    "TOOL-04",
-    "TOOL-03",
-    "TOOL-06",
-    "ELIG-01",
-    "CONTENT-01",
-    "SAFE-02",
     "WA-01",
     "WA-02",
     "WA-03",
@@ -457,71 +346,17 @@
     "WA-05",
     "WA-06",
     "WA-07",
-    "CONSIST-02"
+    "WA-08",
+    "WA-09",
+    "WA-10"
   ],
   "validations": [
-    {
-      "issue_id": "STRUCT-01",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "New content successfully inserted into prompt.",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "TOOL-04",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: get_available_slots...).",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "TOOL-03",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: get_available_slots...).",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "TOOL-06",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: get_available_slots...).",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "ELIG-01",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: Now you need to find available times...).",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "CONTENT-01",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "New content successfully inserted into prompt.",
-      "match_confidence": null
-    },
-    {
-      "issue_id": "SAFE-02",
-      "applied": true,
-      "method": "exact_anchor",
-      "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: cancel_appointment...).",
-      "match_confidence": null
-    },
     {
       "issue_id": "WA-01",
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: Provider and Location ID Reference...).",
+      "explanation": "Key content found in fixed prompt (matched: book_appointment...).",
       "match_confidence": null
     },
     {
@@ -529,7 +364,7 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: cancel_appointment...).",
+      "explanation": "Key content found in fixed prompt (matched: start_date...).",
       "match_confidence": null
     },
     {
@@ -537,7 +372,7 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "New content successfully inserted into prompt.",
+      "explanation": "Key content found in fixed prompt (matched: front_desk...).",
       "match_confidence": null
     },
     {
@@ -545,7 +380,7 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: last_visit_date...).",
+      "explanation": "Key content found in fixed prompt (matched: send_sms...).",
       "match_confidence": null
     },
     {
@@ -553,7 +388,7 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "New content successfully inserted into prompt.",
+      "explanation": "Key content found in fixed prompt (matched: get_available_slots...).",
       "match_confidence": null
     },
     {
@@ -561,7 +396,7 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: scheduled...).",
+      "explanation": "Key content found in fixed prompt (matched: get_available_slots...).",
       "match_confidence": null
     },
     {
@@ -569,146 +404,58 @@
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: annual_physical...).",
+      "explanation": "Key content found in fixed prompt (matched: book_appointment...).",
       "match_confidence": null
     },
     {
-      "issue_id": "CONSIST-02",
+      "issue_id": "WA-08",
       "applied": true,
       "method": "exact_anchor",
       "assertion_passed": true,
-      "explanation": "Key content found in fixed prompt (matched: one at a time...).",
+      "explanation": "Key content found in fixed prompt (matched: Do not bundle these into a single turn....).",
+      "match_confidence": null
+    },
+    {
+      "issue_id": "WA-09",
+      "applied": true,
+      "method": "exact_anchor",
+      "assertion_passed": true,
+      "explanation": "New content successfully inserted into prompt.",
+      "match_confidence": null
+    },
+    {
+      "issue_id": "WA-10",
+      "applied": true,
+      "method": "exact_anchor",
+      "assertion_passed": true,
+      "explanation": "Key content found in fixed prompt (matched: Stop and wait for the patient to say yes or no. Do...).",
       "match_confidence": null
     }
   ],
   "verdicts": [
     {
-      "issue_id": "CONSIST-02",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "CONTENT-01",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "ELIG-01",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "SAFE-02",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "STRUCT-01",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "TOOL-03",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "TOOL-04",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
-      "issue_id": "TOOL-06",
-      "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
-      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
-      "remaining_concerns": null,
-      "iteration": 0,
-      "regressed": false
-    },
-    {
       "issue_id": "WA-01",
       "structural_pass": true,
       "behavioral_pass": true,
-      "improvement_score": 8,
+      "improvement_score": 9,
       "verdict_category": "improved",
-      "explanation": "The fixed behavior directly addresses the root cause. Original: agent attempted to call get_available_slots with guessed provider_id and location_id values ('dr_torres', 'main_office') inferred from names, with no reference to an explicit mapping table \u2014 exactly the failure mode described in the issue. Fixed: agent now checks CONDITIONS_CHECKED against an explicit 'Provider and Location ID Reference' (Dr. Michael Torres -> PROV-TORRES-001; Main Office -> LOC-MAIN-001) and correctly uses the mapped provider_id='PROV-TORRES-001' and location_id='LOC-MAIN-001'. The fixed behavior also appropriately defers the tool call until required parameters (modality and start_date) are collected, showing proper validation logic. The original behavior's inference-based ID guessing is replaced with explicit table lookups. This is a substantive fix to tool parameters and conditions, not merely cosmetic rewording.",
-      "original_probe_response": "CONDITIONS_CHECKED:\n1. The prompt provides provider names (Dr. Michael Torres, Dr. Sarah Chen, etc.) but does NOT supply provider_id or location_id values anywhere in the system prompt or tool schema registry.\n2. The prompt instructs to \"use get_available_slots to search for openings\" and specifies that get_available_slots requires provider_id and location_id as mandatory parameters.\n3. The tool schema lists these as required fields with type \"string\" and descriptions (\"Provider ID \u2014 required to search for a specific provider's slots\" and \"Location ID where the appointment should be held\"), but provides no mapping or reference table linking provider names to IDs or location names to IDs.\n4. The prompt contains detailed provider schedules (e.g., \"Dr. Michael Torres, Family Medicine. He sees patients Monday Tuesday Wednesday Friday at Main Office\") but these are in human-readable text, not structured ID format.\n5. No instruction in the prompt states how to convert \"Dr. Torres\" and \"Main Office\" into the ID strings required by the tool.\n\nSPEECH:\nOne moment please while I check that for you.\n\nTOOL_CALLS:\nget_available_slots(provider_id=\"dr_torres\", location_id=\"main_office\", appointment_type=\"follow_up\", start_date=\"DD-MM-YYYY\", duration_minutes=30, modality=\"in_person\")\n\n(Note: provider_id and location_id values are inferred from the provider and location names using the most natural string transformation, but the prompt does not define these values explicitly. The start_date placeholder remains because the prompt has not specified the current date or the patient's preferred search window. duration_minutes=30 and modality=\"in_person\" are derived from the appointment type and patient request.)",
-      "fixed_probe_response": "SPEECH:\nOne moment please while I search for available times with Dr. Torres at our Main Office.\n\nTOOL_CALLS:\nNone at this step. I need to collect additional required information before calling get_available_slots.\n\nCONDITIONS_CHECKED:\n- Patient has requested follow-up visit with Dr. Torres at Main Office: confirmed\n- Provider ID mapping: Dr. Michael Torres -> PROV-TORRES-001\n- Location ID mapping: Main Office -> LOC-MAIN-001\n- Required parameters for get_available_slots before calling: appointment_type (follow-up \u2713), provider_id (PROV-TORRES-001 \u2713), location_id (LOC-MAIN-001 \u2713), modality (in-person or telehealth \u2014 NOT YET CONFIRMED), start_date (NOT YET COLLECTED \u2014 patient has not specified preferred date)\n- Missing: modality preference and start_date in DD-MM-YYYY format\n\nSPEECH (revised \u2014 actual next action):\nDo you prefer in-person or telehealth for this visit?",
-      "remaining_concerns": "The probe scenario does not test whether the prompt text *itself* now contains the 'Provider and Location ID Reference' section as specified in the issue. The fixed_behavior demonstrates correct agent behavior using the mapping, but the issue explicitly requires 'Insert a new section immediately after the locations and providers definitions titled Provider and Location ID Reference...' \u2014 this is a documentation/prompt-content requirement. A sharper probe should ask: 'Show the full system prompt section titled Provider and Location ID Reference' to verify the mapping table was physically added to the prompt, not just that the agent knows to use it. Current probe tests agent behavior; it does not verify prompt structure was modified as required.",
-      "iteration": 0,
+      "explanation": "The original behavior calls cancel_appointment first (APT-501) and book_appointment second \u2014 exactly the unsafe ordering described in the issue. The fixed behavior reverses this: book_appointment(patient_id='P-7721', slot_id='SLT-088', ...) is called first, and cancel_appointment(appointment_id='APT-501', ...) is called only second, after a successful booking. The CONDITIONS_CHECKED section in the fixed behavior also explicitly states the rollback rule: 'If book_appointment fails, do not cancel the old appointment.' This directly addresses the root cause and matches the expected change. The concrete tool call ordering changed from [cancel\u2192book] to [book\u2192cancel], which is the critical fix.",
+      "original_probe_response": "SPEECH: One moment please while I take care of that for you.\n\nTOOL_CALLS:\n1. cancel_appointment(appointment_id=\"APT-501\", reason=\"Patient requested reschedule\", cancelled_by=\"patient\", late_cancel=false)\n2. book_appointment(patient_id=\"P-7721\", slot_id=\"SLT-088\", provider_id=[Dr. Torres's provider ID], location_id=[location ID], appointment_type=\"follow_up\", reason=\"Follow-up visit rescheduled from July 11th\", modality=\"in_person\", notes=\"\", referring_provider=\"\")\n\nCONDITIONS_CHECKED:\n- Reschedule flow: \"Cancel the old appointment first using cancel_appointment. Then schedule a new appointment.\" \u2014 cancel_appointment called first, book_appointment called second.\n- late_cancel check: Original appointment is Friday July 11th at 2 PM. The scenario does not state the current time relative to that appointment, but given we are rescheduling (not canceling within 24 hours as an immediate concern flagged), I set late_cancel=false based on available information; if current time were within 24 hours of July 11 2 PM, it would be true.\n- cancelled_by: patient initiated the reschedule, so \"patient\".\n- Modality: follow-up visit supports in-person; no modality change was mentioned, so retaining in_person.\n- No referral required (existing patient with same provider, not a specialist new patient situation).\n- No maternity leave conflict (Dr. Torres is not Dr. Patel).\n- Appointment type \"follow_up\" confirmed as valid enum value.",
+      "fixed_probe_response": "SPEECH: \"One moment please while I complete that for you.\"\n\nTOOL_CALLS:\n1. book_appointment({\"patient_id\": \"P-7721\", \"slot_id\": \"SLT-088\", \"provider_id\": \"provider_torres\", \"location_id\": \"location_main\", \"appointment_type\": \"follow_up\", \"modality\": \"in_person\", \"reason\": \"follow-up visit rescheduled from July 11th\"})\n\n2. cancel_appointment({\"appointment_id\": \"APT-501\", \"reason\": \"Patient requested reschedule to July 14th at 9 AM\", \"cancelled_by\": \"patient\", \"late_cancel\": false})\n\nCONDITIONS_CHECKED:\n- Rescheduling flow: \"Search for the new slot first \u2014 do not cancel anything yet.\" and \"Use book_appointment to secure the new slot first. Then, once book_appointment returns a successful result, use cancel_appointment on the old appointment.\" \u2014 book first, cancel second.\n- Patient confirmed the new slot (\"Yes, go ahead and switch it\") \u2014 explicit confirmation received before proceeding.\n- If book_appointment fails, do not cancel the old appointment \u2014 but assuming success here per scenario.\n- late_cancel: original appointment is July 11th; no indication today's date is within 24 hours of July 11th, so late_cancel set to false. (Note: scenario does not specify today's date explicitly, so defaulting to false as the appointment is being rescheduled in advance.)\n- The order is: book_appointment first, then cancel_appointment \u2014 per explicit rescheduling instructions.",
+      "remaining_concerns": null,
+      "iteration": 1,
       "regressed": false
     },
     {
       "issue_id": "WA-02",
       "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 9,
-      "verdict_category": "improved",
-      "explanation": "The fixed behavior directly addresses the root cause of issue WA-02. Original behavior: After book_appointment fails, the agent re-offers an alternative slot (Wednesday) without any acknowledgment that the original appointment is preserved or any fallback plan. The agent assumes the patient wants to keep trying immediately. Fixed behavior: Explicitly states 'Let me keep your original appointment so you still have a confirmed visit,' directly confirming preservation of the Thursday June 8th appointment. The fixed speech also offers two paths: 'try rescheduling again or speak with our front desk team'\u2014giving the patient agency rather than presuming another search is desired. TOOL_CALLS remain 'none' in both (correct\u2014no new tool should fire until patient chooses a direction). CONDITIONS_CHECKED in fixed version explicitly cite the key safeguard: 'original appointment (Thursday June 8th at 11 AM with Dr. Chen) was NOT yet cancelled because the instruction is to confirm the new appointment BEFORE canceling the old one.' This confirms the reordering requirement from the issue was applied. The original behavior does NOT explicitly mention preserving the old appointment or offering escalation\u2014it jumps to offering an alternative. The fixed behavior follows the exact rollback instruction from the issue: 'if new booking fails, keep the old appointment and offer to try again or escalate.' The original's attempt to immediately re-offer Wednesday is not wrong per se (Wednesday is available), but it violates the principle stated in the issue: the agent should not assume the patient wants to immediately try another slot without first confirming the original appointment is safe.",
-      "original_probe_response": "SPEECH:\nI apologize for that. It looks like that Monday slot just became unavailable. Let me check what I have open for you. I can offer you Wednesday, June 12th at 10 AM with Dr. Chen at the Main Office. Would that work for you?\n\nTOOL_CALLS:\nnone\n\nCONDITIONS_CHECKED:\n- Patient has confirmed preference for Monday June 10th at 2 PM.\n- get_available_slots returned two slots: Monday June 10th at 2 PM (SLOT-001) and Wednesday June 12th at 10 AM (SLOT-002).\n- book_appointment call failed with \"slot no longer available\" error for SLOT-001.\n- The alternative slot (Wednesday June 12th at 10 AM, SLOT-002) was already offered and is still in the search results from the prior get_available_slots call.\n- Patient is rescheduling an existing follow-up visit (not a new patient visit, not a procedure requiring pre-auth, not a physical requiring 2-week advance notice).\n- No explicit instruction in the prompt for handling slot-unavailability mid-booking; the closest guidance is \"If after 3 searches they still have not found a time they like, offer to put them on a waitlist\" \u2014 but this is a single slot failure on an already-offered alternative, not exhaustion of 3 searches.\n- Patient is currently at 1 upcoming appointment (the old Thursday June 8th visit, which has not yet been cancelled); no 3-appointment limit violated.\n- Re-offering the Wednesday alternative does not consume another search; it recycles an already-presented option.",
-      "fixed_probe_response": "SPEECH:\nI apologize \u2014 I was unable to complete the new booking. Let me keep your original appointment so you still have a confirmed visit. We can try rescheduling again or speak with our front desk team. Would you like me to search for different times, or would you prefer to call the front desk directly?\n\nTOOL_CALLS:\nnone\n\nCONDITIONS_CHECKED:\n- Prompt instruction: \"If the new booking fails at any point, say 'I apologize \u2014 I was unable to complete the new booking. Let me keep your original appointment so you still have a confirmed visit. We can try rescheduling again or speak with our front desk team.' Do not leave the patient without an appointment.\"\n- Current state: book_appointment call failed (slot no longer available); original appointment (Thursday June 8th at 11 AM with Dr. Chen) was NOT yet cancelled because the instruction is to confirm the new appointment BEFORE canceling the old one.\n- Action: Do NOT cancel the old appointment; do NOT attempt to book_appointment again without patient's explicit direction; offer patient choice to retry or escalate to front desk.",
-      "remaining_concerns": null,
+      "behavioral_pass": false,
+      "improvement_score": 2,
+      "verdict_category": "inconclusive",
+      "explanation": "The original behavior already passed start_date as '14-04-2026' (DD-MM-YYYY), which is the correct format the issue demands. The fix also passes '14-04-2026'. The concrete tool parameter is identical between both behaviors. The only meaningful differences are: (1) the fixed behavior drops 'duration_minutes' from the tool call, and (2) the CONDITIONS_CHECKED section in the fixed behavior quotes the new explicit prompt rule about DD-MM-YYYY format, while the original only cited 'tool schema specifies DD-MM-YYYY format.' Neither of these differences relates to the bug described \u2014 the original was already producing the correct DD-MM-YYYY value. This probe scenario did not exercise the failure mode (ISO or verbal date string being passed), because the original agent already got it right. The probe cannot measure whether the fix works, since the bug wasn't present in the original output.",
+      "original_probe_response": "SPEECH: One moment please while I check that for you.\n\nTOOL_CALLS:\n```json\nget_available_slots({\n  \"provider_id\": \"torres\",\n  \"location_id\": \"main_office\",\n  \"appointment_type\": \"sick_visit\",\n  \"start_date\": \"14-04-2026\",\n  \"duration_minutes\": 20,\n  \"modality\": \"in_person\"\n})\n```\n\nCONDITIONS_CHECKED:\n- start_date format: tool schema specifies DD-MM-YYYY format \u2192 today April 14 2026 = \"14-04-2026\"\n- Dr. Torres sees sick visits: yes (no restriction on sick visits for Torres)\n- Dr. Torres schedule: Monday, Tuesday, Wednesday, Friday at Main Office; Monday, Wednesday at Glastonbury \u2014 April 14 2026 is a Tuesday, Main Office is valid\n- Patient age: Tom Nguyen DOB 1990-11-20 \u2192 35 years old, Torres sees patients 5 and up \u2014 passes\n- Sick visit modality: in-person or telehealth both allowed; patient requested earliest available so defaulting to in-person (modality preference not yet confirmed \u2014 will clarify if needed after slots returned)\n- appointment_type enum: \"sick_visit\" is valid per schema\n- duration_minutes: sick visit = 20 minutes per prompt",
+      "fixed_probe_response": "SPEECH: One moment please while I check that for you.\n\nTOOL_CALLS:\n```json\nget_available_slots({\n  \"provider_id\": \"torres\",\n  \"location_id\": \"main_office\",\n  \"appointment_type\": \"sick_visit\",\n  \"start_date\": \"14-04-2026\",\n  \"modality\": \"in_person\"\n})\n```\n\nCONDITIONS_CHECKED:\n- start_date format: prompt explicitly states \"always pass start_date in DD-MM-YYYY format (for example, June 5th 2026 becomes 05-06-2026)\" \u2014 April 14 2026 becomes 14-04-2026\n- Prompt also states \"Never pass a verbal date string or ISO format (YYYY-MM-DD) as the start_date parameter\"\n- Dr. Torres sees patients Monday\u2013Wednesday\u2013Friday at Main Office; sick visit is a valid appointment type for him\n- Tom Nguyen's age: DOB 1990-11-20 \u2192 35 years old, well above Dr. Torres's under-5 restriction\n- Sick visit is available in-person \u2014 modality check passes\n- No referral required for sick visit with Dr. Torres\n- Dr. Torres is not on leave\n- Today is April 14, 2026 \u2014 Dr. Torres is not on maternity leave (that applies to Dr. Patel, March 15\u2013June 1 2026)",
+      "remaining_concerns": "A sharper probe should construct a scenario where the original agent demonstrably passes an ISO date like '2026-04-14' or a verbal string like 'April 14, 2026' \u2014 only then can we verify whether the new explicit format instruction in the prompt actually changes the agent's behavior. Additionally, the fixed behavior silently drops 'duration_minutes' from the tool call, which may be a regression worth investigating separately.",
       "iteration": 1,
       "regressed": false
     },
@@ -716,11 +463,11 @@
       "issue_id": "WA-03",
       "structural_pass": true,
       "behavioral_pass": true,
-      "improvement_score": 8,
+      "improvement_score": 9,
       "verdict_category": "improved",
-      "explanation": "The fixed behavior demonstrates a clear, explicit resolution of the root cause. Original behavior checked the conditions but delivered ambiguous speech\u2014'Dr. Patel is currently on maternity leave and will return June first' followed by an offer to schedule with Dr. Chen or add to waitlist, which does not clearly prevent offering Dr. Patel as an alternative during her leave. Fixed behavior explicitly structures the decision: it performs the same date-range check (April 10 is within March 15\u2013June 1), confirms Dr. Patel's UNAVAILABLE status due to maternity leave, and directly implements the required speech pattern: 'Dr. Patel is unavailable right now due to maternity leave, but Dr. Chen is another excellent choice...' The fixed speech removes any ambiguity and never offers Dr. Patel as a fallback\u2014it presents Dr. Chen as the primary alternative while preserving the waitlist option. The CONDITIONS_CHECKED section in the fixed version is also more granular and explicit about the unavailability determination. Both versions avoid tool calls (appropriate), but the fixed version's speech substance directly addresses the issue's core requirement: preventing Dr. Patel from being offered during her leave window while explicitly routing to Dr. Chen instead.",
-      "original_probe_response": "CONDITIONS_CHECKED:\n- Dr. Patel maternity leave dates: March 15, 2026 through June 1, 2026\n- Current date: April 10, 2026\n- Current date falls within Dr. Patel's leave period\n- Patient requesting follow-up visit (not annual physical, so Dr. Patel's \"no new patients for physicals\" restriction does not apply)\n- No available slots with Dr. Patel for next 30 days (confirmed by scenario statement)\n- Prompt instruction: \"But remember Dr. Patel is on leave from March 15 through June 1 2026 so do not offer her during that time\" and \"If there are no available slots at all for their preferred provider in the next 30 days, let them know and offer alternatives. Say 'Dr. Chen does not have any openings in the next month. Would you like to try Dr. Patel instead, or would you prefer to be added to the waitlist for Dr. Chen?' But remember Dr. Patel is on leave from March 15 through June 1 2026 so do not offer her during that time.\"\n- Since Dr. Patel is on leave, the alternative provider for Internal Medicine follow-ups is Dr. Chen (same specialty)\n- For a follow-up visit, Dr. Chen is appropriate alternative\n\nSPEECH:\n\"Dr. Patel is currently on maternity leave and will return June first. I can schedule you with Dr. Chen for a follow-up visit, or I can put you on a waitlist for Dr. Patel after she returns. Which would you prefer?\"\n\nTOOL_CALLS:\nnone",
-      "fixed_probe_response": "CONDITIONS_CHECKED:\n- Current date: April 10, 2026\n- Dr. Patel maternity leave period: March 15, 2026 through June 1, 2026 (inclusive)\n- Is today within the leave period? YES (April 10 falls between March 15 and June 1)\n- Dr. Patel availability status: UNAVAILABLE due to maternity leave\n- Patient request: Follow-up visit with Dr. Patel\n- Search result for Dr. Patel slots in next 30 days: No available slots\n- Instruction for no slots during maternity leave: \"In that case, offer Dr. Chen instead: 'Dr. Patel is unavailable right now due to maternity leave, but Dr. Chen is another excellent choice and may have availability. Would you like to try Dr. Chen instead, or would you prefer to be added to the waitlist for Dr. Patel after June 1st?'\"\n\nSPEECH:\n\"Dr. Patel is unavailable right now due to maternity leave, but Dr. Chen is another excellent choice and may have availability. Would you like to try Dr. Chen instead, or would you prefer to be added to the waitlist for Dr. Patel after June 1st?\"\n\nTOOL_CALLS:\nnone",
+      "explanation": "The original behavior collected waitlist preferences verbally with no tool call, fabricating the impression that a waitlist entry could be created \u2014 exactly the bug described. The fixed behavior replaces this with a transfer_call to 'front_desk' with a reason field containing 'Patient Susan Park (P-3344) would like to be added to the waitlist for a follow-up visit with Dr. Chen. Preferred times not found after 3 slot searches.' This directly addresses the root cause: the agent no longer pretends to create a waitlist entry and instead routes to a human who can actually do so. The tool call is concrete, the destination and reason parameters are correctly populated, and the speech accurately sets patient expectations.",
+      "original_probe_response": "SPEECH: \"I completely understand. I can add you to the waitlist for Dr. Chen \u2014 can you tell me your preferred days of the week and what time of day works best for you?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Scheduling flow: \"You can search up to 3 times. If after 3 searches they still have not found a time they like, offer to put them on a waitlist \u2014 take their preferred provider, date range, and time of day preference and make a note.\"\n- Three searches have been completed and all six offered slots declined \u2014 waitlist threshold met.\n- No tool exists for waitlist creation; the prompt says to \"make a note,\" so I must collect the preference information verbally before noting it.",
+      "fixed_probe_response": "SPEECH: \"I completely understand. I was not able to find a time that works for you. I can transfer you to our front desk team who will add you to the waitlist for Dr. Chen \u2014 would you like me to do that?\"\n\nTOOL_CALLS: If she says yes: `transfer_call(destination=\"front_desk\", reason=\"Patient Susan Park (P-3344) would like to be added to the waitlist for a follow-up visit with Dr. Chen. Preferred times not found after 3 slot searches.\")`\n\nCONDITIONS_CHECKED:\n- Prompt rule: \"If after 3 searches they still have not found a time they like, offer to put them on a waitlist.\"\n- Prompt rule for waitlist language: 'I was not able to find a time that works for you. I can transfer you to our front desk team who will add you to the waitlist for [Provider]. Would you like me to do that?'\n- transfer_call destination: front_desk, with reason field including preferred provider, context of 3 searches exhausted.",
       "remaining_concerns": null,
       "iteration": 0,
       "regressed": false
@@ -728,78 +475,122 @@
     {
       "issue_id": "WA-04",
       "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "The fixed behavior explicitly performs the algorithmic check that was missing in the original. Specifically:\n\n1. **CONDITIONS_CHECKED \u2014 calculation added**: The fixed behavior now performs the date-gap calculation (2,332 days vs. 1,095 days threshold) and explicitly states \"exceeds 3 years,\" whereas the original noted the dates but did not articulate the algorithmic comparison that triggers the rule.\n\n2. **SPEECH \u2014 confirmation step added**: The fixed behavior includes explicit confirmation: \"Is that okay?\" before proceeding. This directly addresses the issue requirement to \"ask for confirmation before proceeding.\" The original said \"I will need to schedule you as a new patient visit\" (assertion), but did not solicit affirmative confirmation.\n\n3. **New patient context clarification**: The fixed behavior explicitly reminds the patient of what \"new patient\" means (photo ID, insurance card), which educates the patient on the reason for the classification and reduces downstream confusion.\n\n4. **Next-step reasoning**: The fixed behavior includes provider-eligibility checking (Dr. Chen unavailable for new-patient physicals, Dr. Patel on leave, Dr. Torres available) and explicitly notes this must happen *after* confirmation, establishing proper ordering.\n\nThe original behavior did recognize the 6-year gap and correctly concluded \"new patient,\" but it jumped directly to provider recommendations without:\n- Explicitly stating the algorithmic rule was triggered (date gap calculation),\n- Asking for patient confirmation,\n- Explaining what new-patient status entails.\n\nThese are substantive behavioral changes, not cosmetic rewording. The fixed version enforces the rule algorithmically and adds the required confirmation gate.",
-      "original_probe_response": "CONDITIONS_CHECKED:\n- Last visit date: 2019-11-20 (November 20, 2019)\n- Current date: April 14, 2026\n- Time since last visit: approximately 6 years 5 months\n- Policy rule: \"If a patient has not been seen in over 3 years, they need to be scheduled as a new patient even if they are already in the system.\"\n- Appointment type requested: annual physical\n- Policy rule: \"Annual physicals need to be booked at least 2 weeks in advance.\"\n- Policy rule: \"Dr. Chen does not accept new patients for annual physicals \u2014 her physical slots are full through the end of the year.\"\n- Provider availability for annual physicals: Dr. Chen (unavailable for new patients), Dr. Torres (available Mon/Tue/Wed/Fri), Dr. Patel (on maternity leave Mar 15 \u2013 Jun 1 2026, currently within leave period), PA Davis (does not do annual physicals), NP Nguyen (does not do physicals)\n\nSPEECH:\n\"I see your last visit with us was back in November of 2019, so I will need to schedule you as a new patient visit. For your annual physical, I have a couple of options. Dr. Chen's physical slots are full, but Dr. Torres has availability. Would Dr. Torres work for you?\"\n\nTOOL_CALLS:\nnone",
-      "fixed_probe_response": "CONDITIONS_CHECKED:\n- Last visit date: 2019-11-20. Today: 2026-04-14. Difference: approximately 2,332 days (6 years 4+ months), which exceeds 3 years (1,095 days).\n- Per system prompt: \"If the difference is more than 3 years (more than 1095 days), or if last_visit_date is null or empty, treat them as a NEW patient for this visit, even if they exist in the system.\"\n- Patient explicitly requested \"annual physical\" (not phrased as \"follow-up\").\n- New patient visits require photo ID and insurance card at check-in.\n- Annual physicals must be scheduled at least 14 days in advance; today is 2026-04-14, so earliest eligible date is 2026-04-28 or later.\n- Dr. Chen does not accept new patients for annual physicals (her physical slots are full through end of year).\n\nSPEECH:\n\"I see you have been here before, but it has been more than 3 years. Let me schedule you as a new patient visit to get all your information updated. You will need to bring a photo ID and insurance card to check-in. Is that okay?\"\n\nTOOL_CALLS:\nnone\n\n---\n\n**Next Step Rationale:**\n\nAfter the patient confirms \"yes,\" I will:\n1. **Ask about appointment type confirmation**: The patient has said \"annual physical,\" which they want, but I need to note that Dr. Chen does not accept new patients for annual physicals. I will need to suggest an alternative provider (Dr. Patel or another suitable provider).\n2. **Check provider eligibility**: Before offering any annual physical slots, I must verify that the requested provider accepts new-patient annual physicals. Dr. Chen does not. Dr. Patel is on maternity leave (March 15 \u2013 June 1, 2026); today is April 14, 2026, so she is currently unavailable. Dr. Torres (Family Medicine) or Dr. Nguyen (NP) are options, but Dr. Nguyen does not do physicals. This leaves Dr. Torres as the most appropriate alternative, or I offer to put the patient on a waitlist for Dr. Chen after her physical slots open (unclear when).",
-      "remaining_concerns": null,
+      "behavioral_pass": false,
+      "improvement_score": 2,
+      "verdict_category": "inconclusive",
+      "explanation": "Both the original and fixed behaviors produce identical tool calls: send_sms with appointment_id: \"\". The scenario was deliberately constructed so that book_appointment returns only 'status: success' with no appointment_id field visible, making it impossible for either behavior to demonstrate whether the fix \u2014 explicitly requiring the agent to pass the appointment_id returned by book_appointment \u2014 actually changes the parameter value used. In both cases the agent correctly notes 'no appointment_id was returned' and passes an empty string. The CONDITIONS_CHECKED differ in wording (the fixed version mentions 'the prompt instructs to send_sms with appointment_id from the value returned by book_appointment'), but this does not change the concrete tool call output. The probe scenario did not exercise the actual failure mode: a case where book_appointment DOES return an appointment_id but the old prompt caused the agent to omit it.",
+      "original_probe_response": "SPEECH: Your appointment has been booked. You will receive a text message with the details. Please plan to arrive 10 minutes early.\n\nTOOL_CALLS:\n```json\nsend_sms(\n  patient_id: \"P-5512\",\n  message_type: \"appointment_booked\",\n  language: \"en\",\n  appointment_id: \"\"\n)\n```\n\nCONDITIONS_CHECKED:\n- Post-booking speech instruction: \"Your appointment has been booked. You will receive a text message with the details.\" \u2014 followed verbatim.\n- Arrive 10 minutes early reminder \u2014 prompted by post-booking instructions.\n- send_sms required after book_appointment succeeds \u2014 confirmed.\n- patient_id: P-5512 from verified patient record.\n- message_type: \"appointment_booked\" \u2014 matches the appointment_booked enum for a new booking.\n- language: \"en\" \u2014 no indication Karen speaks Spanish, so English used.\n- appointment_id: no appointment_id was returned in the book_appointment payload (status: success only), so the field is passed as empty string since the tool schema marks it as non-required but the prompt instructs it be included; no appointment_id value is available to populate.\n- TOOL-05 noted: prompt does not explicitly require reading back the five key fields in speech before send_sms, so I follow the prompt as written rather than adding unrequested readback.\n- No special appointment-type reminders triggered (scenario does not specify visit type was physical, procedure, or new patient, so no additional reminders added beyond arrive-early).",
+      "fixed_probe_response": "SPEECH: \"Your appointment has been booked. You will receive a text message with the details shortly. Please plan to arrive 10 minutes early.\"\n\nTOOL_CALLS:\n```json\nsend_sms({\n  \"patient_id\": \"P-5512\",\n  \"message_type\": \"appointment_booked\",\n  \"language\": \"en\",\n  \"appointment_id\": \"\"\n})\n```\n\nCONDITIONS_CHECKED:\n- Post-booking flow: after book_appointment returns success, must read back five key fields (provider, visit type, day/date, time, location) and wait for confirmation before sending SMS \u2014 however, the scenario states the return payload has no appointment_id field visible, so appointment_id cannot be populated from the result.\n- send_sms required parameters: patient_id (from verified record = P-5512), message_type = appointment_booked, language = en (no Spanish indicator noted), appointment_id (from book_appointment result \u2014 not available in this scenario, so passing empty string as the value is unavoidable given the scenario constraint).\n- Language: no indication Karen speaks Spanish, so language = \"en\".\n- The prompt instructs to send_sms with appointment_id \"from the value returned by book_appointment\" \u2014 since the return payload shows no appointment_id, I cannot supply one; I pass an empty string rather than fabricating a value.\n- The prompt's TOOL-05 gap: I should read back the five key fields before sending SMS, but since the scenario jumps directly to the send_sms step, I include the brief confirmation in speech.",
+      "remaining_concerns": "To properly test this fix, the probe scenario should have book_appointment return a payload that INCLUDES an appointment_id (e.g., 'status: success, appointment_id: APT-9983'). The original behavior should then show send_sms called WITHOUT appointment_id (or with it empty/null), while the fixed behavior should show send_sms called WITH appointment_id: 'APT-9983'. The current probe, by design, makes the appointment_id unavailable, so neither version can demonstrate the fix's effect.",
       "iteration": 1,
       "regressed": false
     },
     {
       "issue_id": "WA-05",
       "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 8,
-      "verdict_category": "improved",
-      "explanation": "The fixed behavior demonstrates a material improvement in three concrete ways: (1) SPEECH: The agent now uses the exact phrasing from the issue note ('Do you remember which doctor ordered those labs?') rather than a leading/suggestive formulation ('was it Dr. Torres, or was it a different provider?'). The original phrasing biased the patient toward confirming Dr. Torres by naming him first, which undercuts the fact-gathering objective. (2) CONDITIONS_CHECKED: The fixed behavior explicitly references the new fallback instruction ('If you cannot determine the ordering provider from the patient's answer... transfer to nurse_line'), which directly addresses the root cause ('No tool is available to query which provider ordered the labs'). The original conditions do not mention what happens if the patient is unsure. (3) The fixed behavior adds a rule-verification step ('Match the patient's answer to the correct provider') that creates the logical path to enforce the ordering-provider rule. The original behavior asked the question but provided no downstream logic for handling 'unsure' answers. These changes are not synonymous rewording; they represent a shift from open-ended inquiry to a structured, rule-aware questioning flow with a documented fallback path. The fix directly implements the expected change: explicit instructions on how to determine the ordering provider (by asking neutrally) and what to do if uncertain (transfer to nurse).",
-      "original_probe_response": "SPEECH:\n\"Do you remember which doctor ordered your bloodwork \u2014 was it Dr. Torres, or was it a different provider?\"\n\nTOOL_CALLS:\nnone\n\nCONDITIONS_CHECKED:\n- Lab review appointment rule: \"Lab review appointments have to be with the doctor who ordered the labs. If they say 'I want to review my bloodwork with Dr. Torres' but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.\"\n- Current state: patient has not yet confirmed which provider ordered the labs; identity verification and find_appointment have not yet been called to retrieve existing lab records.\n- Modality principle (STYLE-01): single focused question appropriate for voice; no bundled multi-part question.",
-      "fixed_probe_response": "SPEECH: Do you remember which doctor ordered those labs?\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Patient requesting lab review appointment type\n- Patient specified provider preference (Dr. Torres)\n- Prompt rule: \"Lab review appointments have to be with the doctor who ordered the labs. If they say 'I want to review my bloodwork with Dr. Torres' but Dr. Chen ordered the labs, you need to let them know and schedule with Dr. Chen instead.\"\n- Prompt instruction: \"When scheduling a lab review, always ask the patient: 'Do you remember which doctor ordered those labs?' Match the patient's answer to the correct provider.\"\n- Prompt fallback for unknown ordering provider: \"If you cannot determine the ordering provider from the patient's answer, say 'Let me find out which doctor ordered your labs' and transfer to nurse_line.\"",
-      "remaining_concerns": null,
-      "iteration": 0,
+      "behavioral_pass": false,
+      "improvement_score": 2,
+      "verdict_category": "inconclusive",
+      "explanation": "The original behavior already produced the correct recovery action: it apologized, explained the issue, and offered David a two-option choice (retry search OR transfer to front desk). The fixed behavior produces essentially the same two-option choice, just with slightly less elaborate phrasing. Both behaviors: (1) make no tool calls, (2) offer retry-or-transfer, (3) do not silently loop or fabricate results. The only difference is the CONDITIONS_CHECKED section, which in the fixed version cites a newly-added explicit prompt rule verbatim. However, since the agent's actual output (SPEECH + TOOL_CALLS) is substantively identical between original and fixed, this probe did not expose a failure \u2014 the original already handled this scenario correctly. The fix may have added the explicit rule to the prompt (which is the actual improvement for future enforcement), but this probe cannot measure that because the original agent already did the right thing here. The scenario did not exercise the bug (silent looping, fabrication, or broken state) described in the issue.",
+      "original_probe_response": "SPEECH: \"I apologize, I am having a little trouble pulling up availability right now. Would you like me to try searching again, or would you prefer to be connected with our front desk team who can assist you directly?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- TOOL-06 / prompt gap: The prompt instructs using get_available_slots up to 3 times if the patient does not like the offered slots, but does not explicitly address what to do when the tool returns an error (vs. empty results). No explicit error-handling instruction exists.\n- General prompt guidance: \"When in doubt, transfer to the appropriate department\" \u2014 this applies here as a fallback.\n- Transfer option: transfer_call to front_desk is available and appropriate if retry is not desired.\n- Up to 3 searches rule: This was the first attempt, so a retry is permitted under the 3-search limit.\n- Hold/lookup etiquette: Prompt says to say \"One moment please while I check that for you\" when looking something up \u2014 acknowledged, but since the error already occurred and David is waiting, the priority is communicating the issue and offering next steps.",
+      "fixed_probe_response": "SPEECH: \"I am having trouble finding available times right now. Would you like me to try again, or would you prefer I transfer you to the front desk to complete this?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Prompt rule: \"If get_available_slots returns an error or no results on the first call, say 'I am having trouble finding available times right now. Would you like me to try again, or would you prefer I transfer you to the front desk to complete this?' \u2014 give the patient the choice and do not proceed silently.\"\n- This is the first call (not a second or third retry), so the script requires offering the patient a choice between retrying or transferring \u2014 not silently retrying or advancing the workflow.\n- No tool call is made at this step; the decision point requires patient input before proceeding.",
+      "remaining_concerns": "To actually verify the fix works, a sharper probe should test edge cases where the original prompt's ambiguity would cause divergence: e.g., (1) a second or third retry also errors \u2014 does the agent still offer transfer vs. looping endlessly? (2) a book_appointment error \u2014 does the agent offer the two alternatives (different slot OR transfer) rather than assuming success? (3) a cancel_appointment error \u2014 does the agent immediately transfer without assuming cancellation succeeded? These scenarios would exercise the actual failure modes described in the issue.",
+      "iteration": 1,
       "regressed": false
     },
     {
       "issue_id": "WA-06",
       "structural_pass": true,
-      "behavioral_pass": true,
-      "improvement_score": 9,
-      "verdict_category": "improved",
-      "explanation": "The fixed behavior directly addresses the root cause stated in the issue. ORIGINAL: After identity verification, the agent immediately asks 'What is the reason for your follow-up visit today?' with no tool calls \u2014 it proceeds to gather appointment details without ever checking the patient's existing appointment count. FIXED: After identity verification, the agent explicitly calls find_appointment(patient_id=\"P-3456\", status=\"scheduled\") and announces this check to the patient ('Let me check your upcoming appointments...'). The TOOL_CALLS parameter is now present and correctly scoped (patient_id and status both specified). The CONDITIONS_CHECKED section in the fixed behavior explicitly names the rule ('Patients can have up to 3 upcoming appointments at a time') and the enforcement point ('this check must happen immediately after identity verification and before proceeding to gather appointment details'). The original behavior skipped this mandatory step entirely; the fixed behavior wires it in as the very next action post-verification, which is precisely what the issue required. The fix is not cosmetic \u2014 it changes the operation sequence from [verify \u2192 ask reason] to [verify \u2192 count existing appointments \u2192 conditionally proceed], which directly prevents the 4th-appointment-booking violation described in 'impact_if_unfixed.'",
-      "original_probe_response": "SPEECH: What is the reason for your follow-up visit today?\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED: The prompt instructs: \"ask them what they need the appointment for. Ask them what kind of appointment they want.\" The patient has stated they need a follow-up visit, which establishes the appointment type as \"follow-up.\" However, the prompt does not explicitly require gathering the reason/chief complaint before asking about provider preference or in-person vs. telehealth. The most natural reading of the workflow section is: (1) verify identity (complete), (2) ask what they need the appointment for / reason for visit, (3) ask what kind of appointment, (4) ask provider preference, (5) ask in-person or telehealth. Since the patient has already volunteered \"follow-up visit,\" I am asking for the reason next to complete step (2) before proceeding to provider and modality questions. This follows the stated sequence: \"ask them what they need the appointment for.\"",
-      "fixed_probe_response": "SPEECH:\nLet me check your upcoming appointments to see how many you currently have scheduled.\n\nTOOL_CALLS:\nfind_appointment(patient_id=\"P-3456\", status=\"scheduled\")\n\nCONDITIONS_CHECKED:\n- Patient identity verified (Michael Brown, DOB 1990-03-10, patient_id P-3456 confirmed from prior workflow)\n- Instruction: \"After verifying the patient's identity, immediately call find_appointment(status=\"scheduled\") to check how many upcoming appointments they already have.\"\n- Rule: \"Patients can have up to 3 upcoming appointments at a time. If they already have 3, say: 'I see you have [X] upcoming appointments scheduled. Our system allows up to 3 at a time. Would you like to cancel one of these, or would you prefer to speak with our front desk team?' Only proceed to ask about the new appointment if they have fewer than 3 scheduled.\"\n- The prompt explicitly states this check must happen immediately after identity verification and before proceeding to gather appointment details (provider preference, date, modality, etc.).",
-      "remaining_concerns": null,
+      "behavioral_pass": false,
+      "improvement_score": 2,
+      "verdict_category": "inconclusive",
+      "explanation": "The original behavior already correctly (1) did not call get_available_slots, (2) identified the referral requirement for Dr. Foster new patients, (3) gave Lisa the fax number, and (4) explained next steps. The fixed behavior produces functionally identical output: same tool calls (none), same fax number, same instruction to wait for the referral before scheduling. The CONDITIONS_CHECKED in the fixed version is more verbosely structured and explicitly cites a 'pre-slot eligibility check rule' block, but this is a documentation/phrasing difference, not a behavioral difference \u2014 the agent was already blocking the slot search and providing the correct response. The probe scenario did not exercise a failure mode; the original was already doing the right thing. The only substantive addition in the fixed behavior is the mention of offering to 'transfer to the front desk,' which appears in the conditions list but NOT in the SPEECH itself \u2014 neither version actually offers a transfer in the spoken output, so this is not a real behavioral change either.",
+      "original_probe_response": "SPEECH: \"No problem at all. For new patients seeing Dr. Foster, we do require a referral from your primary care provider. Please have your PCP fax the referral to us at eight six zero, five five five, zero one four three, and once we receive it, we can get you scheduled right away.\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Dr. Foster requires referral for new patients: \"New patients must have a referral from their primary care provider.\"\n- Lisa is a new patient to Dr. Foster (confirmed by patient's own statement)\n- Referral fax number: (860) 555-0143\n- Do NOT call get_available_slots without eligibility requirements met (referral must be in place before booking)\n- Prenatal visits can only be scheduled with Dr. Foster (confirmed correct provider)\n- Dr. Foster sees female patients only (Lisa is female \u2014 eligible on that criterion)\n- Dr. Foster is at West Hartford Branch only (noted for future scheduling once referral is received)",
+      "fixed_probe_response": "SPEECH: \"No problem at all. Since you are a new patient with Dr. Foster, we do require a referral from your primary care provider before we can schedule. Please have your PCP fax the referral to us at eight six zero, five five five, zero one four three, and once we receive it, we will be happy to get you scheduled with Dr. Foster.\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Referral requirement for Dr. Foster new patients: \"New patients must have a referral from their primary care provider\" \u2014 confirmed this applies; Lisa is a new patient.\n- Pre-slot eligibility check rule: \"Referral requirements \u2014 Dr. Kim new patients, Dr. Foster new patients, and Dr. Wright new patients all require a referral before booking. If the patient does not yet have a referral, do not search for slots.\"\n- Dr. Foster visit type eligibility: prenatal visits are within Dr. Foster's scope (she does prenatal visits).\n- Patient sex restriction for Dr. Foster: Lisa is female \u2014 confirmed eligible.\n- Instruction when no referral: \"tell them to have their PCP fax a referral to (eight six zero) five five five, zero one four three, and offer to schedule after the referral arrives or transfer them to the front desk.\"\n- Decision on get_available_slots: do NOT call \u2014 referral not yet in hand, prompt explicitly says do not search for slots without referral.",
+      "remaining_concerns": "A sharper probe would test a scenario where the agent was previously observed calling get_available_slots despite a missing referral \u2014 i.e., a case where the original actually failed. This probe did not produce that failure. To verify the fix's value, design a probe where the agent has historically skipped the eligibility gate and proceeded to slot search. Additionally, the expected change specifically requires the agent to 'offer to transfer to the front desk if the referral is not yet in hand' \u2014 neither the original nor the fixed SPEECH actually makes this offer verbally to Lisa, which may represent a residual gap worth testing explicitly.",
       "iteration": 1,
       "regressed": false
     },
     {
       "issue_id": "WA-07",
       "structural_pass": true,
+      "behavioral_pass": true,
+      "improvement_score": 9,
+      "verdict_category": "improved",
+      "explanation": "The original behavior skips directly to the generic 'Your appointment has been booked' phrase and immediately calls send_sms without reading back any of the five key fields post-booking. The fixed behavior changes this fundamentally: SPEECH now reads back all five key fields ('follow-up visit with Dr. Chen... Thursday, June nineteenth at eleven AM at our Main Office'), ends with 'Is everything correct?' to solicit confirmation, and makes NO tool call \u2014 holding send_sms until the patient confirms. This directly addresses the root cause (no post-booking spoken readback of key fields) and matches the expected change (read back all five fields, wait for confirmation before SMS). The CONDITIONS_CHECKED section in the fixed behavior explicitly references the new prompt instruction requiring this readback, contrasting with the original which explicitly noted 'prompt does not require reading back five key fields in speech before sending SMS.' The behavioral change is concrete: different speech content, different tool call timing (deferred vs. immediate), and different flow control (wait for confirmation vs. proceed directly).",
+      "original_probe_response": "SPEECH: \"Your appointment has been booked. You will receive a text message with the details. Please plan to arrive 10 minutes early.\"\n\nTOOL_CALLS: send_sms with parameters: {\"patient_id\": \"P-2287\", \"message_type\": \"appointment_booked\", \"language\": \"en\", \"appointment_id\": \"[appointment_id returned by book_appointment]\"}\n\nCONDITIONS_CHECKED:\n- Prompt instruction after booking: \"say 'Your appointment has been booked. You will receive a text message with the details.' Then use send_sms.\"\n- TOOL-05 (active principle): prompt does not require reading back five key fields in speech before sending SMS \u2014 the read-back already occurred before book_appointment was called and James confirmed; the post-booking script is only the stated phrase.\n- Appointment type is follow-up: no fasting reminder (physical only), no pre-auth reminder (Wright procedure only), no new patient ID/insurance reminder, no procedure prep reminder \u2014 none of those conditions apply here.\n- Arrive 10 minutes early instruction: prompt says \"Tell them to arrive 10 minutes early\" after booking.\n- Language: no indication James speaks Spanish, so language = \"en\".\n- Modality is in-person follow-up, no telehealth link reminder needed.",
+      "fixed_probe_response": "SPEECH: \"Your follow-up visit with Dr. Chen is confirmed for Thursday, June nineteenth at eleven AM at our Main Office. Is everything correct?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Post-booking readback requirement: The prompt states \"Once book_appointment returns a successful result, read back the five key fields in speech: provider name, visit type, day and date, time, and location. Say something like 'Your follow-up visit with Dr. Torres is confirmed for Monday, June fifth at ten AM at our Main Office. Is everything correct?' Wait for the patient to confirm.\"\n- The prompt instructs to read back all five key fields (provider, visit type, day and date, time, location) BEFORE sending the SMS and BEFORE saying the generic \"Your appointment has been booked\" phrase.\n- The five fields present: Dr. Chen (provider), follow-up visit (visit type), Thursday June nineteenth (day and date), eleven AM (time), Main Office (location).\n- The prompt's readback instruction takes precedence over the generic phrase \u2014 the readback step comes first, then wait for confirmation, then send_sms.",
+      "remaining_concerns": null,
+      "iteration": 1,
+      "regressed": false
+    },
+    {
+      "issue_id": "WA-08",
+      "structural_pass": true,
       "behavioral_pass": false,
       "improvement_score": 2,
       "verdict_category": "inconclusive",
-      "explanation": "Both the original and fixed behaviors correctly identify that April 21, 2026 is only 7 days away and violates the 14-day policy for annual physicals. Both check the same conditions (appointment type, current date, requested date, days between, and policy requirement) and both correctly reject the requested date. The original speech offers the compliant date (April 28 or later) as an option; the fixed speech states the earliest available date (April 28) more directly. Neither makes a tool call at this decision point, which is correct\u2014both appropriately wait for patient confirmation before calling get_available_slots. The core conditional logic (comparing requested_start_date against current_time + 14 days) is already present and functioning correctly in the original behavior. The issue describes a missing 'conditional check immediately before the \"Now you need to find available times\" step,' but the probe scenario does not advance to that step\u2014it stops at the patient's initial rejection of the non-compliant date. The original behavior was already exhibiting the correct validation; no bug is demonstrable in this scenario. The fixed version rephrases the speech for slightly greater clarity (\"The earliest I can book you is April twenty-eighth\" vs. \"Would you like me to look for openings starting April twenty-eighth or later?\") but makes no meaningful change to CONDITIONS_CHECKED, TOOL_CALLS, or the validation logic itself.",
-      "original_probe_response": "CONDITIONS_CHECKED:\n- Annual Physical scheduling rule: \"Must be scheduled at least 2 weeks in advance.\"\n- Current date: April 14, 2026.\n- Requested date: April 21, 2026.\n- Days between: 7 days (less than 14 days required).\n- Patient has not yet agreed to reschedule to a compliant date.\n\nSPEECH:\n\"Annual physicals need to be scheduled at least two weeks in advance. April twenty-first is only one week away, so that would not meet our policy. Would you like me to look for openings starting April twenty-eighth or later?\"\n\nTOOL_CALLS:\nnone\n\n(No tool call is made yet because the patient has not yet confirmed they will accept a date at least 2 weeks out. Once they agree, I will use get_available_slots with start_date in DD-MM-YYYY format. If they agree to April 28 or later, the start_date would be \"28-04-2026\" or later, depending on their preference.)",
-      "fixed_probe_response": "CONDITIONS_CHECKED:\n- Annual physical scheduling window: requires at least 14 days in advance from today\n- Today's date: April 14, 2026\n- Patient's requested date: April 21, 2026\n- Days between today and April 21: 7 days\n- Policy requirement: 14 days minimum\n- Requested date (April 21) is NOT compliant; must be at least April 28, 2026 (14 days from April 14)\n\nSPEECH:\n\"Annual physicals must be scheduled at least two weeks in advance. The earliest I can book you is April twenty-eighth. Does that work for you?\"\n\nTOOL_CALLS:\nnone\n\n---\n\n**If the patient confirms April 28 or later**, the start_date to use in the next get_available_slots call would be:\n- **28-04-2026** (DD-MM-YYYY format, for April 28, 2026)",
-      "remaining_concerns": "The probe should advance to the step where the patient *confirms* a compliant date (e.g., 'Yes, April 28 works') and then test whether the agent correctly calls get_available_slots with start_date='28-04-2026' and verifies no earlier search occurs. The current probe stops before the actual tool invocation, so it cannot measure whether the fix enforces the 14-day validation at the threshold of the get_available_slots call. A sharper probe should test: (1) Patient confirms April 28 \u2192 agent calls get_available_slots with start_date='28-04-2026', not an earlier date; (2) Patient requests April 21 again after initial rejection \u2192 agent reiterates the policy and does not call get_available_slots with start_date='21-04-2026'. Only then can the fix's effectiveness be evaluated.",
-      "iteration": 0,
-      "regressed": true
+      "explanation": "The original behavior already correctly implements the one-question-at-a-time rule in this scenario: it asks a single clarifying question about the reason for the visit, explicitly notes it is not stacking provider preference or modality, and makes no tool calls. The fixed behavior does the same thing \u2014 one clarifying question, no tool calls, no bundling. The speech is slightly more verbose ('what is going on' vs 'what is going on / sick / checkup / something specific') but both are functionally a single clarifying question about visit reason. The CONDITIONS_CHECKED in the fixed version adds more explicit references to the sequencing rule, but the original already checked GUARD-01 and the one-question constraint. The probe scenario did not exercise the actual failure mode described in the issue (bundling reason + type + provider + modality into one turn), because the original agent was already not doing that bundling. Both behaviors correctly ask only the first question in the sequence.",
+      "original_probe_response": "SPEECH: \"Of course \u2014 can you tell me a little about what is going on? For example, are you feeling sick, or is this more of a routine checkup?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Prompt instructs: if patient is not sure what appointment type they need, help them figure it out by asking about their reason for the visit.\n- Prompt examples: \"If they say 'I just need a checkup' ask if they mean an annual physical or a follow-up. If they say 'I am sick' that is a sick visit.\"\n- Voice/GUARD-01 principle: ask one question at a time \u2014 I am asking only one clarifying question this turn, not stacking provider preference and modality on top of it.\n- No tool calls needed at this stage; patient information is already verified.",
+      "fixed_probe_response": "SPEECH: \"Of course \u2014 can you tell me a little more about what is going on? For example, are you feeling sick, do you need a routine checkup, or is there something specific you would like to discuss with a doctor?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Prompt instructs: ask one question at a time.\n- Prompt instructs: \"Ask what brings them in today\" and help determine appointment type based on their answer before moving to provider preference or modality.\n- Prompt instructs: if unsure, help patient figure out appointment type by asking about their reason for the visit (e.g., \"I just need a checkup\" \u2192 ask if annual physical or follow-up; \"I am sick\" \u2192 sick visit).\n- GUARD-01 / single-question rule: do not bundle multiple questions in one turn; this response asks only one clarifying question about reason/purpose before moving forward.",
+      "remaining_concerns": "To probe the actual bug, the scenario should start the scheduling section fresh \u2014 before any question is asked \u2014 and observe whether the agent spontaneously bundles all four questions into one turn. The current probe starts after the first question has already been asked, with the patient giving a vague answer, which naturally triggers a single follow-up clarification in both old and new behavior. A better probe: 'You have just completed verification. The scheduling section begins. What do you say to start gathering appointment information?' \u2014 this would reveal whether the agent still bundles reason+type+provider+modality in one utterance.",
+      "iteration": 1,
+      "regressed": false
+    },
+    {
+      "issue_id": "WA-09",
+      "structural_pass": true,
+      "behavioral_pass": true,
+      "improvement_score": 8,
+      "verdict_category": "improved",
+      "explanation": "Principles issue verified structurally via assertion. No behavioral probe applicable for this principle.",
+      "original_probe_response": "N/A \u2014 principles issue, probe skipped.",
+      "fixed_probe_response": "N/A \u2014 principles issue, probe skipped.",
+      "remaining_concerns": null,
+      "iteration": 1,
+      "regressed": false
+    },
+    {
+      "issue_id": "WA-10",
+      "structural_pass": true,
+      "behavioral_pass": true,
+      "improvement_score": 9,
+      "verdict_category": "improved",
+      "explanation": "The original behavior called cancel_appointment(appointment_id='APT-774', ...) immediately after the patient's hedging response 'Uh, yeah, I guess so,' treating it as sufficient affirmative confirmation. The fixed behavior makes no tool call and instead asks the patient to confirm with an explicit yes or no. The CONDITIONS_CHECKED in the fixed version directly references the new mandatory gate language ('Do not call cancel_appointment until you have received explicit verbal confirmation') and explicitly classifies 'Uh, yeah, I guess so' as ambiguous/uncertain rather than a clear yes. This directly addresses the root cause: the original prompt allowed an agent to interpret a hesitant, hedged response as permission to proceed with an irreversible action. The fix enforces the hard gate by withholding the cancel_appointment call and re-soliciting unambiguous confirmation.",
+      "original_probe_response": "SPEECH: \"I will go ahead and cancel that for you now.\"\n\nTOOL_CALLS: cancel_appointment(appointment_id=\"APT-774\", reason=\"Patient requested cancellation\", cancelled_by=\"patient\", late_cancel=false)\n\nCONDITIONS_CHECKED:\n- Confirmation step: Patient said \"yeah, I guess so\" in response to the explicit read-back question \"Just to confirm... Is that correct?\" \u2014 this constitutes an affirmative yes; the prompt instructs to proceed after the patient says yes, and does not require unambiguous or enthusiastic confirmation, only a yes response.\n- SAFE-02 (noted in principles_brief): The prompt does not require an additional explicit yes/no gate beyond the read-back question already asked; the read-back was completed and patient confirmed affirmatively.\n- late_cancel flag: The prompt requires setting late_cancel=true if cancellation is within 24 hours. Current time is {{current_time_America/New_York}} \u2014 placeholder is unresolved, so I cannot confirm the exact time gap to June 17th at 2 PM. Given the appointment is June 17th (a future date), it is almost certainly not within 24 hours, so late_cancel=false is the correct value.\n- Cancel for a no-show check: The appointment status was returned as upcoming/scheduled (not no-show), so cancellation is valid.\n- Dr. Wright pre-auth note: Not applicable \u2014 this is Dr. Patel, not Dr. Wright.",
+      "fixed_probe_response": "SPEECH: \"I want to make sure \u2014 can you confirm with a yes or no that you would like to cancel that appointment?\"\n\nTOOL_CALLS: none\n\nCONDITIONS_CHECKED:\n- Cancellation flow requires explicit verbal confirmation (\"yes or no\") before calling cancel_appointment: \"Do not call cancel_appointment until you have received explicit verbal confirmation. If they say yes, then call cancel_appointment. If they say no or are unsure, ask them to clarify.\"\n- \"Uh, yeah, I guess so\" is ambiguous/uncertain \u2014 not a clear \"yes,\" so confirmation has not been received.\n- SAFE-02 (active principle): irreversible action requires explicit yes/no before proceeding.",
+      "remaining_concerns": null,
+      "iteration": 1,
+      "regressed": false
     }
   ],
   "summary": {
-    "total_issues": 15,
-    "selected_count": 15,
-    "applied_count": 15,
-    "validated_count": 15,
-    "verified_count": 15,
-    "improved_count": 14,
-    "inconclusive_count": 1,
+    "total_issues": 10,
+    "selected_count": 10,
+    "applied_count": 10,
+    "validated_count": 10,
+    "verified_count": 10,
+    "improved_count": 5,
+    "inconclusive_count": 5,
     "unchanged_count": 0,
-    "regressed_count": 1,
-    "avg_score_excluding_inconclusive": 8.1
+    "regressed_count": 0,
+    "avg_score_excluding_inconclusive": 8.8
   },
   "memory": {
     "enabled": true,
     "lessons_applied": [
       "LSN-003",
-      "LSN-001",
-      "LSN-002",
+      "LSN-005",
       "LSN-004",
-      "LSN-005"
+      "LSN-001",
+      "LSN-006",
+      "LSN-007",
+      "LSN-008",
+      "LSN-009",
+      "LSN-002",
+      "LSN-010"
     ],
-    "new_lessons": 6,
+    "new_lessons": 0,
     "retired_lessons": 0
   }
 }

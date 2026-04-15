@@ -90,6 +90,6 @@ merged on the next run.
 
 ## Run log (episodic layer, last 20)
 
-### run-2026-04-15T17:25 — assignment-agent-prompt.json (hash=15cdabe3b8, domain=healthcare, modality=voice)
-- issues=11, improved=13, unchanged=1, inconclusive=1, regressed=1
+### run-2026-04-15T17:39 — assignment-agent-prompt.json (hash=15cdabe3b8, domain=healthcare, modality=voice)
+- issues=10, improved=5, unchanged=0, inconclusive=5, regressed=0
 
