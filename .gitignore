@@ -72,7 +72,6 @@ instance/
 docs/*
 !docs/prompts/
 !docs/task/
-output/
 
 # PyBuilder
 .pybuilder/
@@ -182,3 +181,4 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+output/.DS_Store
